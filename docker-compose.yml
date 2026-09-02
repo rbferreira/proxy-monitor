@@ -1,0 +1,21 @@
+services:
+  proxy-monitor:
+    build: .
+    container_name: proxy-monitor
+    ports:
+      - "8069:8069"
+    environment:
+      # Everything below is optional and has a sane default. Leave API_KEY unset
+      # and one is generated on first boot, then printed once in the log.
+      - INTERVAL_SECONDS=${INTERVAL_SECONDS:-1200}
+      - MAX_LATENCY_SECONDS=${MAX_LATENCY_SECONDS:-5.0}
+      - VALIDATOR_WORKERS=${VALIDATOR_WORKERS:-100}
+      - PUBLIC_DASHBOARD=${PUBLIC_DASHBOARD:-true}
+    volumes:
+      # Holds the proxy cache, the settings overrides, the password hash and the
+      # session signing key. Without it every restart starts from scratch.
+      - proxy-monitor-data:/data
+    restart: unless-stopped
+
+volumes:
+  proxy-monitor-data:

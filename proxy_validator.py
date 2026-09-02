@@ -167,7 +167,11 @@ def filter_by_type(proxies: list[str], types: list[str] | None = None) -> list[s
     Many consumers accept just a subset — SOCKS4, in particular, is rejected by
     a lot of tooling. `types=None` means "everything we know how to validate".
     """
-    allowed = {t.lower().strip() for t in (types or KNOWN_SCHEMES) if t and t.strip()}
+    # Intersected with what we know how to validate: a caller asking for a
+    # protocol this validator never tests would be served entries nothing
+    # vouched for.
+    requested = {t.lower().strip() for t in (types or KNOWN_SCHEMES) if t and t.strip()}
+    allowed = requested & set(KNOWN_SCHEMES)
     out = []
     for p in proxies:
         p = p.strip()

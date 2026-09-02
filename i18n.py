@@ -155,6 +155,10 @@ CATALOG: dict[str, dict] = {
             "fill_both": "fill in both fields",
             "changing": "changing...",
             "language": "Language",
+            "refresh": "revalidate",
+            "security_group": "Security",
+            "on": "on",
+            "off": "off",
         },
     },
 
@@ -290,6 +294,10 @@ CATALOG: dict[str, dict] = {
             "fill_both": "preencha os dois campos",
             "changing": "trocando...",
             "language": "Idioma",
+            "refresh": "revalidar",
+            "security_group": "Segurança",
+            "on": "ligado",
+            "off": "desligado",
         },
     },
 }
