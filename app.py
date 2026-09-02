@@ -27,6 +27,9 @@ import settings as settings_mod
 
 OUTPUT_FILE = os.environ.get("OUTPUT_FILE", "/data/proxies.txt")
 DATA_DIR = os.path.dirname(OUTPUT_FILE) or "."
+# When the list was produced. Kept beside it so a restart does not report
+# "never validated" while serving a cache that plainly came from somewhere.
+CACHE_META_FILE = OUTPUT_FILE + ".meta.json"
 
 # Machine credential for the data endpoints, used by scripts through the
 # X-API-Key header. Generated on first boot and persisted next to the rest of
@@ -276,7 +279,7 @@ def build_snapshot(proxies: list[str], latencies: dict[str, float]) -> tuple[lis
     return proxy_data, stats
 
 
-def write_output_file(proxies: list[str]) -> None:
+def write_output_file(proxies: list[str], meta: dict | None = None) -> None:
     """Persist the list to disk so it survives restarts."""
     try:
         if DATA_DIR:
@@ -285,6 +288,16 @@ def write_output_file(proxies: list[str]) -> None:
             f.write("\n".join(proxies) + ("\n" if proxies else ""))
     except OSError as exc:
         _log(f"WARNING: could not write {OUTPUT_FILE}: {exc}")
+        return
+    if meta is None:
+        return
+    try:
+        tmp = CACHE_META_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        os.replace(tmp, CACHE_META_FILE)
+    except OSError as exc:
+        _log(f"WARNING: could not write {CACHE_META_FILE}: {exc}")
 
 
 def load_cached_proxies() -> None:
@@ -298,14 +311,28 @@ def load_cached_proxies() -> None:
     if not proxies:
         return
 
+    meta = {}
+    try:
+        with open(CACHE_META_FILE, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            meta = loaded
+    except (OSError, ValueError):
+        pass
+    stamp = meta.get("last_run")
+
     proxy_data, stats = build_snapshot(proxies, {})
     _set_state(
         proxies=proxies,
         proxy_data=proxy_data,
         stats=stats,
+        last_run=stamp,
+        duration=meta.get("duration"),
+        source_count=meta.get("source_count"),
         message=f"{len(proxies)} proxies loaded from the on-disk cache (awaiting validation)",
     )
-    _log(f"On-disk cache loaded: {len(proxies)} proxies")
+    _log(f"On-disk cache loaded: {len(proxies)} proxies"
+         + (f", validated at {stamp}" if stamp else ""))
 
 
 def run_validation() -> None:
@@ -346,7 +373,9 @@ def run_validation() -> None:
             status="ok",
             message=f"{len(valid)} of {len(proxies)} proxies valid",
         )
-        write_output_file(valid)
+        write_output_file(valid, {"last_run": _state["last_run"],
+                                  "duration": duration,
+                                  "source_count": len(proxies)})
         _log(f"Validation finished in {duration}s: {len(valid)}/{len(proxies)} proxies valid")
     except Exception as exc:
         _set_state(status="error", message=str(exc))

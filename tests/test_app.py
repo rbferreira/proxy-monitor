@@ -309,6 +309,42 @@ class TestOutputFile:
         monkeypatch.setattr(app_module, "OUTPUT_FILE", str(tmp_path / "absent.txt"))
         app_module.load_cached_proxies()  # must not raise
 
+    def test_remembers_when_the_list_was_validated(self, tmp_path, monkeypatch):
+        """A restart that serves a cache must not claim it never validated —
+        the dashboard would contradict itself, and anything polling last_run
+        would wait a whole interval for a timestamp it already had."""
+        target = tmp_path / "proxies.txt"
+        monkeypatch.setattr(app_module, "OUTPUT_FILE", str(target))
+        monkeypatch.setattr(app_module, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(app_module, "CACHE_META_FILE", str(target) + ".meta.json")
+
+        app_module.write_output_file(
+            ["http://1.1.1.1:80"],
+            {"last_run": "2026-01-01T00:00:00Z", "duration": 12.5, "source_count": 9},
+        )
+        app_module._set_state(last_run=None, duration=None, source_count=None)
+        app_module.load_cached_proxies()
+
+        with app_module._lock:
+            assert app_module._state["last_run"] == "2026-01-01T00:00:00Z"
+            assert app_module._state["duration"] == 12.5
+            assert app_module._state["source_count"] == 9
+
+    def test_a_corrupt_timestamp_file_is_ignored(self, tmp_path, monkeypatch):
+        target = tmp_path / "proxies.txt"
+        meta = tmp_path / "proxies.txt.meta.json"
+        monkeypatch.setattr(app_module, "OUTPUT_FILE", str(target))
+        monkeypatch.setattr(app_module, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(app_module, "CACHE_META_FILE", str(meta))
+        app_module.write_output_file(['http://1.1.1.1:80'])
+        meta.write_text("{not json", encoding="utf-8")
+
+        app_module._set_state(last_run=None)
+        app_module.load_cached_proxies()  # must not raise
+        with app_module._lock:
+            assert app_module._state["proxies"] == ["http://1.1.1.1:80"]
+            assert app_module._state["last_run"] is None
+
 
 class TestListToken:
     """Consumers that can only fetch a URL cannot send a header, so the
