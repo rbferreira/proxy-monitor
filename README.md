@@ -53,6 +53,8 @@ The session is a **signed, HttpOnly cookie**: no credential is kept anywhere a
 script on the page could read it. The API key never reaches the browser — it
 stays what it should be, a machine credential for scripts.
 
+![alt text](img/screenshot.png)
+
 ### Settings panel
 
 Seven settings editable at runtime, grouped into Validation, Geolocation and
