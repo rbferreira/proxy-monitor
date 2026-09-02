@@ -2182,6 +2182,18 @@ def api_settings_post():
     if not isinstance(changes, dict) or not changes:
         return jsonify({"error": "nothing to apply"}), 400
 
+    # Checked here rather than inside the settings module: resolving a hostname
+    # is network I/O, and `Store.load()` shares that validation path — the boot
+    # would start doing DNS lookups for every persisted source.
+    blocked = [
+        reason
+        for url in settings_mod.parse_list(changes.get("proxy_sources", []))
+        for allowed, reason in [proxy_validator.source_is_allowed(url)]
+        if not allowed
+    ]
+    if blocked:
+        return jsonify({"error": "invalid values", "errors": blocked}), 400
+
     applied, errors = settings_store.apply(changes, locale)
     if errors:
         return jsonify({"error": "invalid values", "errors": errors}), 400
@@ -2209,6 +2221,13 @@ def api_test_source():
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return jsonify({"ok": False, "error": "not an http(s) URL"}), 400
+
+    # Without this the endpoint is a port scanner: the three possible answers
+    # (responded / connection refused / timed out) map the network the server
+    # can reach and the caller cannot.
+    allowed, reason = proxy_validator.source_is_allowed(url)
+    if not allowed:
+        return jsonify({"ok": False, "error": reason}), 400
 
     started = time.perf_counter()
     try:

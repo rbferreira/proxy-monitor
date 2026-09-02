@@ -603,3 +603,39 @@ class TestConfigurableSources:
         isolated_settings.apply({"proxy_sources": ["https://mine/list"]})
         app_module.run_validation()
         assert seen["sources"] == ["https://mine/list"]
+
+
+class TestSourceGuardOverApi:
+    def test_test_source_refuses_an_internal_target(self, client, monkeypatch):
+        """Otherwise the endpoint is a port scanner: responded / refused /
+        timed out maps the network the server reaches and the caller does not."""
+        monkeypatch.setattr(app_module.proxy_validator, "source_is_allowed",
+                            lambda u: (False, "resolves to a private address"))
+        r = client.post("/api/settings/test-source",
+                        json={"url": "http://192.168.1.1/list"}, headers=KEY)
+        assert r.status_code == 400
+        assert "private" in r.get_json()["error"]
+
+    def test_saving_an_internal_source_is_refused(self, client, isolated_settings, monkeypatch):
+        monkeypatch.setattr(app_module.proxy_validator, "source_is_allowed",
+                            lambda u: ("192.168" not in u, "resolves to a private address"))
+        r = client.post("/api/settings",
+                        json={"proxy_sources": ["http://192.168.1.1/list"]}, headers=KEY)
+        assert r.status_code == 400
+        assert isolated_settings.is_overridden("proxy_sources") is False
+
+    def test_public_sources_still_save(self, client, isolated_settings, monkeypatch):
+        monkeypatch.setattr(app_module.proxy_validator, "source_is_allowed",
+                            lambda u: (True, ""))
+        r = client.post("/api/settings",
+                        json={"proxy_sources": ["https://public.example/list"]}, headers=KEY)
+        assert r.status_code == 200
+        assert isolated_settings.get("proxy_sources") == ["https://public.example/list"]
+
+    def test_other_settings_do_not_pay_for_the_check(self, client, isolated_settings, monkeypatch):
+        """Saving an unrelated setting must not trigger DNS resolution."""
+        called = []
+        monkeypatch.setattr(app_module.proxy_validator, "source_is_allowed",
+                            lambda u: (called.append(u), (True, ""))[1])
+        client.post("/api/settings", json={"dashboard_rows": 40}, headers=KEY)
+        assert called == []

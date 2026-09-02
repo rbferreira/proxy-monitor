@@ -18,7 +18,9 @@ Dependencies:
 """
 
 import argparse
+import ipaddress
 import os
+import socket
 import sys
 import threading
 import time
@@ -56,12 +58,63 @@ HTTP_TEST_URLS = [
     "http://example.com",
 ]
 
+# Source URLs pointing at the server's own network are refused by default.
+#
+# The service fetches whatever URL it is given, so an operator could otherwise
+# use it to probe hosts only it can reach — a router, an unauthenticated admin
+# panel, or a cloud metadata endpoint like 169.254.169.254, which hands out
+# credentials. Set ALLOW_INTERNAL_SOURCES=true when you genuinely host your
+# proxy list on the same private network.
+ALLOW_INTERNAL_SOURCES = os.environ.get("ALLOW_INTERNAL_SOURCES", "false").lower() in (
+    "true", "1", "yes", "on")
+
 MAX_LATENCY_SECONDS = float(os.environ.get("MAX_LATENCY_SECONDS", "5.0"))
 DEFAULT_WORKERS = int(os.environ.get("VALIDATOR_WORKERS", "100"))
 DEFAULT_OUTPUT = "proxies.txt"
 
 # Protocols this validator knows how to test.
 KNOWN_SCHEMES = ("http", "https", "socks4", "socks5")
+
+
+def resolves_to_internal(hostname: str) -> bool:
+    """True when the hostname resolves to an address inside the server's own
+    network: loopback, RFC1918, link-local, multicast or otherwise reserved.
+
+    A name that does not resolve returns False — the fetch will fail on its own,
+    and guessing here would block legitimate hosts that are momentarily down.
+
+    Caveat worth knowing: this checks the name at validation time. A hostname
+    that resolves publicly now and privately later (DNS rebinding) slips past.
+    Closing that needs resolving once and connecting to that exact address,
+    which is a bigger change than this guard is worth.
+    """
+    if not hostname:
+        return True
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError):
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return True
+    return False
+
+
+def source_is_allowed(url: str) -> tuple[bool, str]:
+    """(allowed, reason). Reason is empty when allowed."""
+    if ALLOW_INTERNAL_SOURCES:
+        return True, ""
+    from urllib.parse import urlparse as _urlparse
+    host = _urlparse(url).hostname
+    if resolves_to_internal(host):
+        return False, (f"{host} resolves to a private address; "
+                       "set ALLOW_INTERNAL_SOURCES=true to permit it")
+    return True, ""
 
 
 def sources_from_env() -> list[str] | None:
@@ -124,6 +177,10 @@ def fetch_proxies(source_urls: list[str] | None = None) -> list[str]:
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for url in source_urls:
+        allowed, reason = source_is_allowed(url)
+        if not allowed:
+            print(f"WARNING: skipping {url}: {reason}", file=sys.stderr, flush=True)
+            continue
         default_scheme = scheme_for_source(url)
         try:
             req = urllib.request.Request(url, headers=headers)

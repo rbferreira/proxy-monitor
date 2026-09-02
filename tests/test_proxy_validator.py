@@ -211,3 +211,84 @@ class TestTestProtocol:
         ok, _ = pv.validate("http://1.1.1.1:80")
         assert ok
         assert seen[0].startswith("https://")
+
+
+class TestInternalSourceGuard:
+    """The service fetches whatever URL it is handed, so an operator could
+    otherwise point it at hosts only the server can reach — a router, an
+    unauthenticated panel, or a cloud metadata endpoint handing out credentials."""
+
+    def test_detects_loopback(self, monkeypatch):
+        monkeypatch.setattr(pv.socket, "getaddrinfo",
+                            lambda *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))])
+        assert pv.resolves_to_internal("localhost") is True
+
+    def test_detects_rfc1918(self, monkeypatch):
+        for addr in ("10.0.0.1", "172.16.5.5", "192.168.1.1"):
+            monkeypatch.setattr(pv.socket, "getaddrinfo",
+                                lambda *a, **kw: [(2, 1, 6, "", (addr, 0))])
+            assert pv.resolves_to_internal("host.internal") is True, addr
+
+    def test_detects_link_local_metadata(self, monkeypatch):
+        """169.254.169.254 is the cloud metadata endpoint — the classic escalation."""
+        monkeypatch.setattr(pv.socket, "getaddrinfo",
+                            lambda *a, **kw: [(2, 1, 6, "", ("169.254.169.254", 0))])
+        assert pv.resolves_to_internal("metadata") is True
+
+    def test_allows_a_public_address(self, monkeypatch):
+        monkeypatch.setattr(pv.socket, "getaddrinfo",
+                            lambda *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))])
+        assert pv.resolves_to_internal("example.com") is False
+
+    def test_blocks_when_any_answer_is_internal(self, monkeypatch):
+        """A name resolving to both a public and a private address is still a
+        way in — the connection could land on either."""
+        monkeypatch.setattr(pv.socket, "getaddrinfo", lambda *a, **kw: [
+            (2, 1, 6, "", ("93.184.216.34", 0)),
+            (2, 1, 6, "", ("192.168.0.5", 0)),
+        ])
+        assert pv.resolves_to_internal("mixed.example") is True
+
+    def test_empty_hostname_is_refused(self):
+        assert pv.resolves_to_internal("") is True
+        assert pv.resolves_to_internal(None) is True
+
+    def test_unresolvable_name_is_allowed_through(self, monkeypatch):
+        """The fetch will fail on its own; guessing here would block a legitimate
+        host that happens to be down."""
+        def boom(*a, **kw):
+            raise pv.socket.gaierror("nope")
+        monkeypatch.setattr(pv.socket, "getaddrinfo", boom)
+        assert pv.resolves_to_internal("down.example.com") is False
+
+    def test_source_is_allowed_reports_a_reason(self, monkeypatch):
+        monkeypatch.setattr(pv, "ALLOW_INTERNAL_SOURCES", False)
+        monkeypatch.setattr(pv, "resolves_to_internal", lambda h: True)
+        allowed, reason = pv.source_is_allowed("http://192.168.1.1/list")
+        assert allowed is False
+        assert "ALLOW_INTERNAL_SOURCES" in reason
+
+    def test_opt_in_lets_internal_through(self, monkeypatch):
+        """Someone genuinely hosting their list on a private box must be able to."""
+        monkeypatch.setattr(pv, "ALLOW_INTERNAL_SOURCES", True)
+        monkeypatch.setattr(pv, "resolves_to_internal", lambda h: True)
+        allowed, _ = pv.source_is_allowed("http://192.168.1.1/list")
+        assert allowed is True
+
+    def test_fetch_skips_a_blocked_source(self, monkeypatch):
+        monkeypatch.setattr(pv, "source_is_allowed", lambda u: (False, "blocked"))
+        assert pv.fetch_proxies(["http://192.168.1.1/list"]) == []
+
+    def test_fetch_keeps_going_past_a_blocked_source(self, monkeypatch):
+        import io
+
+        class FakeResponse(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr(pv, "source_is_allowed",
+                            lambda u: (("192.168" not in u), "blocked"))
+        monkeypatch.setattr(pv.urllib.request, "urlopen",
+                            lambda *a, **kw: FakeResponse(b"1.1.1.1:8080\n"))
+        out = pv.fetch_proxies(["http://192.168.1.1/list", "https://public.example/list"])
+        assert out == ["http://1.1.1.1:8080"]

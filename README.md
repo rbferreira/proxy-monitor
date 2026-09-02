@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-186%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
@@ -69,8 +69,18 @@ returns nothing, or HTML, or a format the parser does not recognize.
 
 A source must return plain text, one proxy per line, as `ip:port` or
 `protocol://ip:port`. When the URL carries a `protocol=` parameter it is used
-for lines with no scheme. Only `http`/`https` URLs are accepted — anything else
-would be handed to `urlopen`, and a `file://` there reads the server's own disk.
+for lines with no scheme.
+
+**Sources cannot point at your own network.** Only `http`/`https` URLs are
+accepted, and hostnames resolving to loopback, RFC1918, link-local or reserved
+addresses are refused. Without that, anyone who can log into the dashboard could
+use the server to probe hosts only it can reach — a router, an unauthenticated
+admin panel, or `169.254.169.254`, the cloud metadata endpoint that hands out
+credentials. The three possible answers (responded, connection refused, timed
+out) are enough to map a private network.
+
+Set `ALLOW_INTERNAL_SOURCES=true` when you genuinely host your proxy list on the
+same private network.
 
 The schema lives in `settings.py` and is served by `GET /api/settings`, so the
 UI builds its form from it — **adding a setting in Python makes it appear on
@@ -135,6 +145,7 @@ Everything is optional — the service runs unconfigured. Copy `.env.example` to
 | `MAX_LATENCY_SECONDS` | `5.0` | Health cutoff |
 | `VALIDATOR_WORKERS` | `100` | Concurrent validation threads |
 | `PROXY_SOURCES` | *(built-in)* | Initial source list, comma or newline separated. The panel overrides it |
+| `ALLOW_INTERNAL_SOURCES` | `false` | `true` permits sources on private/loopback addresses |
 | `GEOLOOKUP` | `true` | Country lookups through ip-api.com |
 | `GEOLOOKUP_MAX_IPS` | `500` | Cap on **new** IPs resolved per cycle |
 | `PUBLIC_DASHBOARD` | `true` | `false` requires a login to view |
