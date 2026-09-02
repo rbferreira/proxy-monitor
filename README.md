@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-167%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-186%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
@@ -57,9 +57,20 @@ stays what it should be, a machine credential for scripts.
 
 ### Settings panel
 
-Seven settings editable at runtime, grouped into Validation, Geolocation and
-Dashboard. Each shows what it changes, the accepted range, the default and the
-environment variable it comes from.
+Eight settings editable at runtime, grouped into Proxy sources, Validation,
+Geolocation and Dashboard. Each shows what it changes, the accepted range, the
+default and the environment variable it comes from.
+
+**Proxy sources are editable from the panel** — add, remove and reorder the URLs
+without a redeploy. Each row has a **test** button that fetches the URL and
+reports how many proxies it yields, broken down by protocol, before you save.
+Adding a source blind otherwise means waiting a whole cycle to discover it
+returns nothing, or HTML, or a format the parser does not recognize.
+
+A source must return plain text, one proxy per line, as `ip:port` or
+`protocol://ip:port`. When the URL carries a `protocol=` parameter it is used
+for lines with no scheme. Only `http`/`https` URLs are accepted — anything else
+would be handed to `urlopen`, and a `file://` there reads the server's own disk.
 
 The schema lives in `settings.py` and is served by `GET /api/settings`, so the
 UI builds its form from it — **adding a setting in Python makes it appear on
@@ -92,6 +103,7 @@ never touches the schema.
 | `GET /api/settings` | 🔑 | Schema and current values, localized |
 | `POST /api/settings` | 🔑 | Apply a batch |
 | `POST /api/settings/reset` | 🔑 | Reset one (`{"key": "..."}`) or all |
+| `POST /api/settings/test-source` | 🔑 | `{"url": "..."}` fetches a source and reports what it yields |
 
 🔑 = a dashboard **session** or the `X-API-Key` header. With
 `PUBLIC_DASHBOARD=false`, `/` and `/api/stats` require credentials too.
@@ -122,7 +134,7 @@ Everything is optional — the service runs unconfigured. Copy `.env.example` to
 | `INTERVAL_SECONDS` | `1200` | Seconds between full revalidations |
 | `MAX_LATENCY_SECONDS` | `5.0` | Health cutoff |
 | `VALIDATOR_WORKERS` | `100` | Concurrent validation threads |
-| `PROXY_SOURCES` | *(built-in)* | Alternative sources, comma or newline separated |
+| `PROXY_SOURCES` | *(built-in)* | Initial source list, comma or newline separated. The panel overrides it |
 | `GEOLOOKUP` | `true` | Country lookups through ip-api.com |
 | `GEOLOOKUP_MAX_IPS` | `500` | Cap on **new** IPs resolved per cycle |
 | `PUBLIC_DASHBOARD` | `true` | `false` requires a login to view |

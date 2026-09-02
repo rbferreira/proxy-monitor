@@ -13,6 +13,7 @@ import os
 import secrets
 import threading
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -317,7 +318,7 @@ def run_validation() -> None:
         _set_state(status="running", message="Validating proxies...")
         _log("Validation started")
 
-        proxies = proxy_validator.fetch_proxies()
+        proxies = proxy_validator.fetch_proxies(cfg("proxy_sources"))
         if not proxies:
             raise RuntimeError("no source returned any proxy")
 
@@ -873,6 +874,30 @@ DASHBOARD_HTML = """
         .cfg-controle input.invalido { border-color: var(--red); }
 
         .cfg-bool { display: flex; gap: 6px; }
+
+        /* Lista de URLs: ocupa a linha inteira, porque URL de fonte é longa e
+           truncar no meio esconde justamente o parâmetro que muda o resultado. */
+        .cfg-item.wide { grid-template-columns: 1fr; }
+        .cfg-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+        .cfg-list-row { display: flex; gap: 6px; align-items: center; }
+        .cfg-list-row input[type="url"] {
+            flex: 1;
+            font-family: inherit;
+            font-size: 11px;
+            color: var(--ink);
+            background: var(--void);
+            border: 1px solid var(--rule-hi);
+            padding: 7px 10px;
+            outline: none;
+            min-width: 0;
+        }
+        .cfg-list-row input:focus { border-color: var(--amber-dim); }
+        .cfg-list-row input.invalido { border-color: var(--red); }
+        .cfg-list-row .chip { flex: 0 0 auto; padding: 6px 10px; font-size: 9px; }
+        .cfg-list-msg { font-size: 10px; color: var(--ink-faint); padding-left: 2px; min-height: 12px; }
+        .cfg-list-msg.ok { color: var(--teal); }
+        .cfg-list-msg.erro { color: var(--red); }
+        .cfg-list-actions { display: flex; gap: 6px; margin-top: 4px; }
         .cfg-bool .chip { flex: 1; padding: 7px 4px; font-size: 9px; }
 
         .cfg-restaurar {
@@ -1483,7 +1508,105 @@ DASHBOARD_HTML = """
                 const ctrl = document.createElement('div');
                 ctrl.className = 'cfg-controle';
 
-                if (a.type === 'bool') {
+                if (a.type === 'list') {
+                    // Full width: source URLs are long, and truncating them hides
+                    // the query parameter that decides what the source returns.
+                    row.classList.add('wide');
+                    ctrl.className = 'cfg-list';
+                    const values = Array.isArray(a.value) ? a.value.slice() : [];
+
+                    // Same contract as the numeric inputs: an invalid entry blocks
+                    // saving instead of letting the server reject it after the click.
+                    const commit = () => {
+                        const inputs = [...ctrl.querySelectorAll('input[type=url]')];
+                        const urls = inputs.map((i) => i.value.trim()).filter(Boolean);
+                        const anyInvalid = inputs.some((i) => i.classList.contains('invalido'));
+                        if (anyInvalid || urls.length === 0) {
+                            delete cfgPending[a.key];
+                            markPending();
+                            return;
+                        }
+                        stage(a.key, urls);
+                    };
+
+                    const addRow = (url) => {
+                        const line = document.createElement('div');
+                        line.className = 'cfg-list-row';
+
+                        const inp = document.createElement('input');
+                        inp.type = 'url';
+                        inp.value = url || '';
+                        inp.placeholder = t('source_url_placeholder');
+                        inp.addEventListener('input', () => {
+                            const v = inp.value.trim();
+                            inp.classList.toggle('invalido', Boolean(v) && !/^https?:[/][/].+/i.test(v));
+                            commit();
+                        });
+
+                        const test = document.createElement('button');
+                        test.className = 'chip';
+                        test.type = 'button';
+                        test.textContent = t('test_source');
+
+                        const msg = document.createElement('div');
+                        msg.className = 'cfg-list-msg';
+
+                        test.addEventListener('click', async () => {
+                            const v = inp.value.trim();
+                            if (!v) return;
+                            test.disabled = true;
+                            msg.className = 'cfg-list-msg';
+                            msg.textContent = t('testing');
+                            const r = await action('/api/settings/test-source', {
+                                method: 'POST', body: JSON.stringify({ url: v }),
+                            });
+                            test.disabled = false;
+                            if (!r) { msg.className = 'cfg-list-msg erro'; msg.textContent = t('load_failed'); return; }
+                            if (r.ok) {
+                                const types = Object.entries(r.by_type)
+                                    .map(([k, n]) => k + ' ' + n).join(', ');
+                                msg.className = 'cfg-list-msg ok';
+                                msg.textContent = t('source_ok', { found: r.found, types: types });
+                            } else if (r.error) {
+                                msg.className = 'cfg-list-msg erro';
+                                msg.textContent = t('source_failed', { error: r.error });
+                            } else {
+                                msg.className = 'cfg-list-msg erro';
+                                msg.textContent = t('source_empty', { lines: r.lines });
+                            }
+                        });
+
+                        const del = document.createElement('button');
+                        del.className = 'chip';
+                        del.type = 'button';
+                        del.textContent = t('remove_source');
+                        del.addEventListener('click', () => {
+                            wrap.remove();
+                            commit();
+                        });
+
+                        line.appendChild(inp);
+                        line.appendChild(test);
+                        line.appendChild(del);
+
+                        const wrap = document.createElement('div');
+                        wrap.appendChild(line);
+                        wrap.appendChild(msg);
+                        ctrl.insertBefore(wrap, actions);
+                    };
+
+                    const actions = document.createElement('div');
+                    actions.className = 'cfg-list-actions';
+                    const add = document.createElement('button');
+                    add.className = 'chip';
+                    add.type = 'button';
+                    add.textContent = t('add_source');
+                    add.addEventListener('click', () => { addRow(''); commit(); });
+                    actions.appendChild(add);
+                    ctrl.appendChild(actions);
+
+                    values.forEach(addRow);
+                } else if (a.type === 'bool') {
                     const box = document.createElement('div');
                     box.className = 'cfg-bool';
                     [[t('on'), true], [t('off'), false]].forEach(([label, val]) => {
@@ -2072,6 +2195,44 @@ def api_settings_post():
         "persisted": disk_error is None,
         "warning": f"could not write to disk: {disk_error}" if disk_error else None,
         "settings": settings_store.describe(locale),
+    }), 200
+
+
+@app.post("/api/settings/test-source")
+def api_test_source():
+    """Fetch one source URL and report what it yields, without saving anything.
+
+    Adding a source blind means waiting a whole cycle to find out it returns
+    nothing, or HTML, or a format we cannot parse. This answers in seconds.
+    """
+    url = (request.get_json(silent=True) or {}).get("url", "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return jsonify({"ok": False, "error": "not an http(s) URL"}), 400
+
+    started = time.perf_counter()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            text = resp.read(2_000_000).decode("utf-8", errors="replace")
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:200]}), 200
+
+    scheme = proxy_validator.scheme_for_source(url)
+    lines = text.splitlines()
+    found = [p for p in (proxy_validator.normalize_proxy(l, scheme) for l in lines) if p]
+    by_type = {}
+    for p in found:
+        kind = proxy_validator.proxy_type(p) or "?"
+        by_type[kind] = by_type.get(kind, 0) + 1
+
+    return jsonify({
+        "ok": bool(found),
+        "found": len(found),
+        "lines": len(lines),
+        "by_type": by_type,
+        "sample": found[:3],
+        "elapsed": round(time.perf_counter() - started, 2),
     }), 200
 
 

@@ -24,12 +24,20 @@ LANGUAGES = {
 CATALOG: dict[str, dict] = {
     "en": {
         "groups": {
+            "sources": "Proxy sources",
             "validation": "Validation",
             "geo": "Geolocation",
             "dashboard": "Dashboard",
             "security": "Security",
         },
         "settings": {
+            "proxy_sources": {
+                "label": "Source URLs",
+                "description": "One URL per line. Each must return a plain-text list of "
+                               "proxies, as `ip:port` or `protocol://ip:port`. When the URL "
+                               "carries a `protocol=` parameter it is used for lines without "
+                               "a scheme. Test a URL before saving to see what it yields.",
+            },
             "interval_seconds": {
                 "label": "Interval between cycles",
                 "description": "How often the whole list is revalidated. Shorter keeps the "
@@ -159,17 +167,35 @@ CATALOG: dict[str, dict] = {
             "security_group": "Security",
             "on": "on",
             "off": "off",
+            "test_source": "test",
+            "testing": "testing...",
+            "source_ok": "{found} proxies ({types})",
+            "source_empty": "responded, but no proxy recognized in {lines} lines",
+            "source_failed": "failed: {error}",
+            "source_url_placeholder": "https://example.com/proxies.txt",
+            "add_source": "add",
+            "remove_source": "remove",
+            "one_per_line": "one URL per line",
         },
     },
 
     "pt-BR": {
         "groups": {
+            "sources": "Fontes de proxy",
             "validation": "Validação",
             "geo": "Geolocalização",
             "dashboard": "Dashboard",
             "security": "Segurança",
         },
         "settings": {
+            "proxy_sources": {
+                "label": "URLs das fontes",
+                "description": "Uma URL por linha. Cada uma precisa devolver uma lista de "
+                               "proxies em texto puro, no formato `ip:porta` ou "
+                               "`protocolo://ip:porta`. Se a URL tiver um parâmetro "
+                               "`protocol=`, ele vale para as linhas sem esquema. Teste uma "
+                               "URL antes de salvar para ver o que ela devolve.",
+            },
             "interval_seconds": {
                 "label": "Intervalo entre ciclos",
                 "description": "De quanto em quanto tempo a lista inteira é revalidada. Menor deixa "
@@ -298,6 +324,15 @@ CATALOG: dict[str, dict] = {
             "security_group": "Segurança",
             "on": "ligado",
             "off": "desligado",
+            "test_source": "testar",
+            "testing": "testando...",
+            "source_ok": "{found} proxies ({types})",
+            "source_empty": "respondeu, mas nenhum proxy reconhecido em {lines} linhas",
+            "source_failed": "falhou: {error}",
+            "source_url_placeholder": "https://exemplo.com/proxies.txt",
+            "add_source": "adicionar",
+            "remove_source": "remover",
+            "one_per_line": "uma URL por linha",
         },
     },
 }

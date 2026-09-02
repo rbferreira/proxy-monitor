@@ -257,7 +257,7 @@ class TestHealthDuringValidation:
 
         release = threading.Event()
 
-        def slow_fetch():
+        def slow_fetch(sources=None):
             release.wait(timeout=5)
             return ["http://1.1.1.1:80"]
 
@@ -516,3 +516,90 @@ class TestApiKeyGeneration:
         pattern = r"""environ\.get\(\s*["']API_KEY["']\s*,\s*["'][^"']+["']"""
         populated = re.search(pattern, source)
         assert populated is None, f"hardcoded API key default: {populated.group(0)}"
+
+
+class TestSourceTesting:
+    """Adding a source blind means waiting a whole cycle to learn it returns
+    nothing. This endpoint answers in seconds."""
+
+    def test_needs_a_credential(self, client):
+        assert client.post("/api/settings/test-source",
+                           json={"url": "https://example.com"}).status_code == 401
+
+    def test_rejects_a_non_http_url(self, client):
+        for bad in ["file:///etc/passwd", "ftp://host/x", "not-a-url", ""]:
+            r = client.post("/api/settings/test-source", json={"url": bad}, headers=KEY)
+            assert r.status_code == 400, bad
+            assert r.get_json()["ok"] is False
+
+    def test_reports_what_a_source_yields(self, client, monkeypatch):
+        import io
+
+        class FakeResponse(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        body = b"1.1.1.1:8080\n2.2.2.2:3128\nnot a proxy\n"
+        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+                            lambda *a, **kw: FakeResponse(body))
+
+        r = client.post("/api/settings/test-source",
+                        json={"url": "https://example.com/list"}, headers=KEY)
+        d = r.get_json()
+        assert d["ok"] is True
+        assert d["found"] == 2
+        assert d["by_type"] == {"http": 2}
+        assert d["sample"][0].startswith("http://")
+
+    def test_reports_a_source_that_yields_nothing(self, client, monkeypatch):
+        import io
+
+        class FakeResponse(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+                            lambda *a, **kw: FakeResponse(b"<html>rate limited</html>"))
+        d = client.post("/api/settings/test-source",
+                        json={"url": "https://example.com/list"}, headers=KEY).get_json()
+        assert d["ok"] is False
+        assert d["found"] == 0
+
+    def test_reports_a_fetch_failure_without_raising(self, client, monkeypatch):
+        def boom(*a, **kw):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(app_module.urllib.request, "urlopen", boom)
+        r = client.post("/api/settings/test-source",
+                        json={"url": "https://example.com/list"}, headers=KEY)
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["ok"] is False
+        assert "refused" in d["error"]
+
+    def test_infers_the_protocol_from_the_url(self, client, monkeypatch):
+        import io
+
+        class FakeResponse(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+                            lambda *a, **kw: FakeResponse(b"1.1.1.1:1080\n"))
+        d = client.post("/api/settings/test-source",
+                        json={"url": "https://api/?protocol=socks5"}, headers=KEY).get_json()
+        assert d["by_type"] == {"socks5": 1}
+
+
+class TestConfigurableSources:
+    def test_validation_uses_the_configured_sources(self, monkeypatch, isolated_settings):
+        seen = {}
+
+        def fake_fetch(sources=None):
+            seen["sources"] = sources
+            return []
+
+        monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies", fake_fetch)
+        isolated_settings.apply({"proxy_sources": ["https://mine/list"]})
+        app_module.run_validation()
+        assert seen["sources"] == ["https://mine/list"]

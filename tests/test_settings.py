@@ -212,3 +212,77 @@ class TestDescribe:
         fallback = {i["key"]: i["label"] for i in store.describe("de")}
         english = {i["key"]: i["label"] for i in store.describe("en")}
         assert fallback == english
+
+
+class TestListSetting:
+    """Proxy sources are a list, so the schema had to grow a type beyond
+    number and boolean."""
+
+    def test_default_comes_from_the_validator(self):
+        import proxy_validator as pv
+        assert st.BY_KEY["proxy_sources"].default == list(pv.PROXY_SOURCES)
+
+    def test_accepts_a_real_list(self):
+        s = st.BY_KEY["proxy_sources"]
+        assert st.coerce(s, ["https://a/list", "https://b/list"]) == [
+            "https://a/list", "https://b/list"]
+
+    def test_accepts_newlines_and_commas(self):
+        s = st.BY_KEY["proxy_sources"]
+        assert st.coerce(s, "https://a/list\nhttps://b/list") == [
+            "https://a/list", "https://b/list"]
+        assert st.coerce(s, "https://a/list, https://b/list") == [
+            "https://a/list", "https://b/list"]
+
+    def test_drops_blank_lines(self):
+        s = st.BY_KEY["proxy_sources"]
+        assert st.coerce(s, "https://a/list\n\n   \nhttps://b/list") == [
+            "https://a/list", "https://b/list"]
+
+    def test_rejects_an_empty_list(self):
+        """With no source there is nothing to validate, and the next cycle would
+        silently produce an empty list."""
+        with pytest.raises(ValueError, match="at least one"):
+            st.coerce(st.BY_KEY["proxy_sources"], [])
+        with pytest.raises(ValueError, match="at least one"):
+            st.coerce(st.BY_KEY["proxy_sources"], "   ")
+
+    def test_rejects_non_http_schemes(self):
+        """A file:// or ftp:// URL goes straight to urlopen and would read the
+        server's own disk."""
+        for bad in ["file:///etc/passwd", "ftp://host/list", "javascript:alert(1)"]:
+            with pytest.raises(ValueError, match="http"):
+                st.coerce(st.BY_KEY["proxy_sources"], [bad])
+
+    def test_rejects_a_url_without_a_host(self):
+        with pytest.raises(ValueError, match="http"):
+            st.coerce(st.BY_KEY["proxy_sources"], ["https://"])
+
+    def test_enforces_the_item_cap(self):
+        s = st.BY_KEY["proxy_sources"]
+        too_many = [f"https://host{i}/list" for i in range(s.max_items + 1)]
+        with pytest.raises(ValueError, match="at most"):
+            st.coerce(s, too_many)
+
+    def test_env_var_accepts_a_separated_string(self, store, monkeypatch):
+        monkeypatch.setenv("PROXY_SOURCES", "https://a/list,https://b/list")
+        assert store.get("proxy_sources") == ["https://a/list", "https://b/list"]
+
+    def test_override_and_persistence(self, store):
+        store.apply({"proxy_sources": ["https://mine/list"]})
+        store.save()
+        other = st.Store(store.path)
+        other.load()
+        assert other.get("proxy_sources") == ["https://mine/list"]
+
+    def test_reset_returns_to_the_builtin_list(self, store, monkeypatch):
+        monkeypatch.delenv("PROXY_SOURCES", raising=False)
+        store.apply({"proxy_sources": ["https://mine/list"]})
+        store.reset("proxy_sources")
+        assert store.get("proxy_sources") == st.BY_KEY["proxy_sources"].default
+
+    def test_describe_exposes_it_as_a_list(self, store):
+        item = {i["key"]: i for i in store.describe()}["proxy_sources"]
+        assert item["type"] == "list"
+        assert isinstance(item["value"], list)
+        assert item["group"] == "Proxy sources"

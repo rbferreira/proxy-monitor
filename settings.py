@@ -19,15 +19,17 @@ import json
 import os
 import threading
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import i18n
+import proxy_validator
 
 
 @dataclass(frozen=True)
 class Setting:
     key: str            # identifier in the API and in the state file
     env: str            # env var providing the default
-    type: str           # "int" | "float" | "bool"
+    type: str           # "int" | "float" | "bool" | "list"
     default: object     # used when the env var is unset
     group: str          # group key, translated through i18n
     minimum: float | None = None
@@ -35,9 +37,16 @@ class Setting:
     unit: str = ""
     # "immediate" = next request; "next_cycle" = only on the next validation
     effect: str = "immediate"
+    # "list" only: cap on how many entries are accepted
+    max_items: int = 50
 
 
 SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        key="proxy_sources", env="PROXY_SOURCES", type="list",
+        default=list(proxy_validator.PROXY_SOURCES),
+        group="sources", effect="next_cycle", max_items=50,
+    ),
     Setting(
         key="interval_seconds", env="INTERVAL_SECONDS", type="int", default=1200,
         minimum=60, maximum=86400, unit="s", group="validation", effect="next_cycle",
@@ -79,6 +88,8 @@ def _from_env(s: Setting):
         return s.default
     raw = raw.strip()
     try:
+        if s.type == "list":
+            return parse_list(raw)
         if s.type == "bool":
             return raw.lower() not in ("false", "0", "no", "off")
         if s.type == "int":
@@ -88,10 +99,33 @@ def _from_env(s: Setting):
         return s.default
 
 
+def parse_list(raw) -> list[str]:
+    """Accept a real list or a comma/newline separated string, and drop blanks."""
+    if isinstance(raw, list):
+        parts = [str(p) for p in raw]
+    else:
+        parts = str(raw or "").replace(",", "\n").splitlines()
+    return [p.strip() for p in parts if p and p.strip()]
+
+
 def coerce(s: Setting, value, locale: str = i18n.DEFAULT_LOCALE):
     """Convert and validate a value coming from the API. Raises ValueError with
     a message meant to be shown on screen, localized."""
     label = i18n.setting_text(locale, s.key)["label"]
+
+    if s.type == "list":
+        entries = parse_list(value)
+        if not entries:
+            raise ValueError(f"{label}: at least one entry is required")
+        if len(entries) > s.max_items:
+            raise ValueError(f"{label}: at most {s.max_items} entries")
+        for entry in entries:
+            parsed = urlparse(entry)
+            # Anything but http/https would be handed straight to urlopen, and a
+            # file:// or similar scheme there reads the server's own disk.
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ValueError(f"{label}: not an http(s) URL: {entry[:60]}")
+        return entries
 
     if s.type == "bool":
         if isinstance(value, bool):
