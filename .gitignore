@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime state: proxy cache, settings overrides, password hash and session key.
+data/
+*.local.json

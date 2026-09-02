@@ -1,0 +1,4 @@
+requests==2.32.3
+pysocks==1.7.1
+flask==3.1.0
+gunicorn==23.0.0
