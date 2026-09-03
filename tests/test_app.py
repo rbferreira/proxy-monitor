@@ -951,3 +951,107 @@ class TestScheduledCycleWaits:
         source = inspect.getsource(app_module.scheduler_loop)
         assert "run_validation(wait=True)" in source
         assert "\n        run_validation()" not in source
+
+
+class TestQualityOrdering:
+    """Latency alone puts a fast proxy that fails half the time above a
+    dependable one — backwards for a consumer taking the first N."""
+
+    def _seed_three(self):
+        fast_flaky = "http://1.1.1.1:80"
+        slow_solid = "http://2.2.2.2:80"
+        unmeasured = "http://3.3.3.3:80"
+        seed([fast_flaky, slow_solid, unmeasured],
+             {fast_flaky: 0.2, slow_solid: 2.0})
+        for _ in range(6):
+            app_module.stability_store.record(slow_solid, 2.0)
+        for i in range(6):
+            app_module.stability_store.record(fast_flaky, 0.2 if i % 2 else None)
+        return fast_flaky, slow_solid, unmeasured
+
+    def test_stable_beats_fast(self, client):
+        fast_flaky, slow_solid, _ = self._seed_three()
+        order = client.get("/proxy/all", headers=KEY).get_json()["proxies"]
+        assert order.index(slow_solid) < order.index(fast_flaky)
+
+    def test_latency_sort_is_still_available(self, client):
+        fast_flaky, slow_solid, _ = self._seed_three()
+        order = client.get("/proxy/all?sort=latency", headers=KEY).get_json()["proxies"]
+        assert order.index(fast_flaky) < order.index(slow_solid)
+
+    def test_stable_sort_is_diff_friendly(self, client):
+        """A list that reshuffles every request makes a consumer filter out
+        reordering noise to see real changes."""
+        self._seed_three()
+        first = client.get("/proxy/all?sort=stable", headers=KEY).get_json()["proxies"]
+        second = client.get("/proxy/all?sort=stable", headers=KEY).get_json()["proxies"]
+        assert first == second == sorted(first)
+
+    def test_unmeasured_lands_between_stable_and_unstable(self, client):
+        """Unknown is not a failure, so it must not sort below one."""
+        fast_flaky, slow_solid, unmeasured = self._seed_three()
+        order = client.get("/proxy/all", headers=KEY).get_json()["proxies"]
+        assert order.index(slow_solid) < order.index(unmeasured) < order.index(fast_flaky)
+
+
+class TestCountryFilter:
+    def _seed_with_countries(self, monkeypatch):
+        monkeypatch.setattr(app_module, "fetch_countries",
+                            lambda ips: {"1.1.1.1": "Brazil", "2.2.2.2": "Germany"})
+        seed(["http://1.1.1.1:80", "http://2.2.2.2:80"],
+             {"http://1.1.1.1:80": 0.5, "http://2.2.2.2:80": 0.5})
+
+    def test_narrows_to_one_country(self, client, monkeypatch):
+        self._seed_with_countries(monkeypatch)
+        got = client.get("/proxy/all?country=Brazil", headers=KEY).get_json()["proxies"]
+        assert got == ["http://1.1.1.1:80"]
+
+    def test_case_insensitive_and_multiple(self, client, monkeypatch):
+        self._seed_with_countries(monkeypatch)
+        got = client.get("/proxy/all?country=brazil,GERMANY", headers=KEY).get_json()["proxies"]
+        assert len(got) == 2
+
+    def test_no_parameter_keeps_everything(self, client, monkeypatch):
+        self._seed_with_countries(monkeypatch)
+        assert len(client.get("/proxy/all", headers=KEY).get_json()["proxies"]) == 2
+
+    def test_an_unknown_country_returns_nothing_rather_than_everything(self, client, monkeypatch):
+        """Silently ignoring a filter nobody matched would hand back the full
+        list as if it were the answer."""
+        self._seed_with_countries(monkeypatch)
+        assert client.get("/proxy/all?country=Narnia", headers=KEY).get_json()["proxies"] == []
+
+
+class TestTextTemplate:
+    def test_plain_output_is_unchanged(self, client):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.5})
+        body = client.get("/proxy/all.txt", headers=KEY).get_data(as_text=True)
+        assert body.strip() == "http://1.1.1.1:80"
+
+    def test_fields_are_substituted(self, client, monkeypatch):
+        monkeypatch.setattr(app_module, "fetch_countries", lambda ips: {"1.1.1.1": "Brazil"})
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.5})
+        body = client.get("/proxy/all.txt?format={{ip}}:{{port}}|{{country}}|{{protocol}}",
+                          headers=KEY).get_data(as_text=True)
+        assert body.strip() == "1.1.1.1:80|Brazil|http"
+
+    def test_a_missing_value_renders_empty_not_none(self, client):
+        """`None` in a text line is a Python leak, not a value."""
+        seed(["http://1.1.1.1:80"], {})
+        body = client.get("/proxy/all.txt?format={{full}}|{{latency}}|{{country}}",
+                          headers=KEY).get_data(as_text=True)
+        assert body.strip() == "http://1.1.1.1:80||"
+
+    def test_an_unknown_placeholder_is_left_alone(self, client):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.5})
+        body = client.get("/proxy/all.txt?format={{full}} {{nope}}",
+                          headers=KEY).get_data(as_text=True)
+        assert "{{nope}}" in body
+
+    def test_the_template_carries_the_stability_verdict(self, client):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.5})
+        for _ in range(6):
+            app_module.stability_store.record("http://1.1.1.1:80", 0.4)
+        body = client.get("/proxy/all.txt?format={{full}}|{{stability}}",
+                          headers=KEY).get_data(as_text=True)
+        assert body.strip().endswith("|stable")

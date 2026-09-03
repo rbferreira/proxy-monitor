@@ -105,8 +105,8 @@ never touches the schema.
 | `GET /api/stats` | — | Aggregate metrics and the fastest proxies |
 | `GET /api/auth` | — | Session state |
 | `POST /api/login` | — | `{"password": "..."}` opens a session |
-| `GET /proxy/all` | 🔑 | Full list as JSON. `?types=` filters protocols, `?stable=true` restricts to proxies with a stable verdict |
-| `GET /proxy/all.txt` | 🔑 | Same list in plain text, one per line. Same `?types=` and `?stable=` |
+| `GET /proxy/all` | 🔑 | Full list as JSON. `?types=`, `?stable=`, `?country=`, `?sort=` |
+| `GET /proxy/all.txt` | 🔑 | Same list in plain text. Same filters, plus `?format=` |
 | `POST /api/refresh` | 🔑 | Revalidate now (`202`, or `409` if already running) |
 | `POST /api/logout` | 🔑 | End the session |
 | `POST /api/password` | 🔑 | `{"current": "...", "new": "..."}` |
@@ -236,6 +236,62 @@ for an outage it did not cause.
 
 Measured here: of 309 proxies a full cycle called valid, around 140 answer on any
 given re-check and roughly 75 earn a stable verdict.
+
+## Getting the list you want
+
+Both list endpoints take the same filters, and they compose:
+
+| Parameter | Example | What it does |
+|---|---|---|
+| `types` | `?types=http,socks5` | Protocols. Plenty of tools reject SOCKS4 |
+| `stable` | `?stable=true` | Only proxies with a stable verdict |
+| `country` | `?country=Brazil,Germany` | Country names, case-insensitive |
+| `sort` | `?sort=latency` | `quality` (default), `latency`, or `stable` |
+
+**Quality is the default order, not speed.** Sorting by latency alone puts a fast
+proxy that fails half the time above a dependable one that is slightly slower —
+backwards for anyone taking the first N off the list. The order is verdict
+first, then how often it actually works, then latency as the tie-breaker.
+
+`?sort=stable` returns plain alphabetical order, which does not move between
+requests. That is for consumers diffing the list: otherwise every fetch looks
+changed because things reordered.
+
+The text endpoint also takes a template:
+
+```
+/proxy/all.txt?format={{protocol}}://{{ip}}:{{port}}|{{country}}|{{stability}}
+```
+
+Available fields: `protocol`, `ip`, `port`, `full`, `latency`, `country`,
+`exit_ip`, `stability`. Without `format` the output is `scheme://ip:port`, one
+per line, exactly as before.
+
+## What validating over HTTPS buys
+
+The choice to test through a real HTTPS request rather than a plain HTTP one is
+the oldest decision in this project, and it turns out to carry more than the
+false-positive rejection it was made for. Measured here, against live proxies:
+
+**A proxy cannot tamper with the response.** The TLS tunnel is end-to-end, so a
+proxy sitting in the middle cannot read or alter what comes back without failing
+certificate validation. Of 87 proxies that passed, 87 returned exactly the empty
+`204` expected — none injected anything.
+
+**Proxies that intercept TLS are rejected automatically.** 9 of 61 proxies that
+could otherwise answer — around 15% — only work with certificate verification
+disabled, which means they are terminating TLS themselves. They never reach the
+list, and nothing had to be written to exclude them.
+
+**Every proxy published is elite, structurally.** A proxy relaying a CONNECT
+tunnel cannot add `X-Forwarded-For`, `Via` or anything else, because it cannot
+see the request inside the tunnel. Checked against a header-echo service through
+150 proxies: over HTTPS, 96 of 96 leaked nothing. The same proxies over plain
+HTTP exposed the caller's real address in **55%** of cases, and 11 injected an
+`x-proxy-id` header.
+
+That last measurement is why there is no anonymity classification here. It is
+not missing — over HTTPS there is nothing left to classify.
 
 ## Notes
 
