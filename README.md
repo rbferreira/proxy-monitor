@@ -4,33 +4,59 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-347%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
 
-## Why validate over HTTPS
+## The same proxies leaked my IP 55% of the time over HTTP, and 0% over HTTPS
 
-Most proxy checkers fetch an `http://` URL and call it a day. That does not
-exercise the `CONNECT` method — the request goes out in absolute-URI form and
-any transparent cache can answer it. Real traffic is HTTPS, which requires the
-proxy to open a tunnel.
+Most proxy checkers fetch an `http://` URL and call it a day. This one makes a
+real HTTPS request, and that single decision turns out to carry the whole
+project. Every number below was measured against live proxies, not argued from
+first principles.
 
-Measured on one run of 652 proxies:
+**It rejects proxies that would expose you.** Checked through a header-echo
+service, 150 proxies at a time:
+
+| | Answered | Leaked the caller's IP |
+|---|---|---|
+| Plain HTTP | 44 | **24 — 55%** |
+| HTTPS via `CONNECT` | 96 | **0** |
+
+Eleven of them also injected an `x-proxy-id` header on the way through. Over
+HTTPS none of that is possible: a proxy relaying a `CONNECT` tunnel cannot see
+the request it is carrying, so it cannot add a header to it or read one.
+**Every proxy this publishes is elite by construction** — not classified as
+elite, incapable of being anything else.
+
+**It rejects proxies that intercept TLS.** 9 of 61 proxies that could otherwise
+answer — around 15% — only work with certificate verification switched off,
+which means they are terminating TLS themselves and reading your traffic. They
+never reach the list, and there is no code excluding them: certificate
+validation does it.
+
+**It rejects proxies that cannot carry real traffic.** A plain-HTTP request does
+not exercise `CONNECT` at all — it goes out in absolute-URI form and any
+transparent cache can answer it. On one run of 652 proxies:
 
 | Test method | Passed | |
 |---|---|---|
 | Plain HTTP | 174 | 26.7% |
 | HTTPS via `CONNECT` | **70** | 10.7% |
 
-The difference were **false positives** — proxies that look alive and cannot
-carry the traffic anyone actually wants to send. The list this produces is
-smaller and usable. `--test-http` on the CLI reproduces the weaker check if you
-want to compare.
+The other 104 were false positives. The list this produces is smaller and
+usable. `--test-http` on the CLI reproduces the weaker check if you want to see
+it for yourself.
+
+**And a proxy cannot tamper with what comes back.** The tunnel is end-to-end, so
+altering the response means failing certificate validation. Of 87 proxies that
+passed, 87 returned exactly the empty `204` expected.
 
 Latency is measured with `perf_counter` around the whole request, so it includes
 the TCP connection and the proxy handshake — the expensive part that
-`response.elapsed` leaves out.
+`response.elapsed` leaves out — and reported as the median of several samples,
+so one hiccup does not become a property of the proxy.
 
 ## Dashboard
 
@@ -267,31 +293,15 @@ Available fields: `protocol`, `ip`, `port`, `full`, `latency`, `country`,
 `exit_ip`, `stability`. Without `format` the output is `scheme://ip:port`, one
 per line, exactly as before.
 
-## What validating over HTTPS buys
+## Why there is no anonymity classification
 
-The choice to test through a real HTTPS request rather than a plain HTTP one is
-the oldest decision in this project, and it turns out to carry more than the
-false-positive rejection it was made for. Measured here, against live proxies:
+Other checkers grade proxies elite / anonymous / transparent. That grading only
+means something when you validate over plain HTTP, where the proxy parses the
+request and can add `X-Forwarded-For` or `Via` to it.
 
-**A proxy cannot tamper with the response.** The TLS tunnel is end-to-end, so a
-proxy sitting in the middle cannot read or alter what comes back without failing
-certificate validation. Of 87 proxies that passed, 87 returned exactly the empty
-`204` expected — none injected anything.
-
-**Proxies that intercept TLS are rejected automatically.** 9 of 61 proxies that
-could otherwise answer — around 15% — only work with certificate verification
-disabled, which means they are terminating TLS themselves. They never reach the
-list, and nothing had to be written to exclude them.
-
-**Every proxy published is elite, structurally.** A proxy relaying a CONNECT
-tunnel cannot add `X-Forwarded-For`, `Via` or anything else, because it cannot
-see the request inside the tunnel. Checked against a header-echo service through
-150 proxies: over HTTPS, 96 of 96 leaked nothing. The same proxies over plain
-HTTP exposed the caller's real address in **55%** of cases, and 11 injected an
-`x-proxy-id` header.
-
-That last measurement is why there is no anonymity classification here. It is
-not missing — over HTTPS there is nothing left to classify.
+Over `CONNECT` there is nothing to grade: 96 of 96 proxies leaked nothing,
+because none of them could. The feature is not missing — the property it would
+measure is already guaranteed.
 
 ## Notes
 
