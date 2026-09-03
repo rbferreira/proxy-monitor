@@ -21,6 +21,7 @@ import requests
 from flask import Flask, abort, jsonify, render_template_string, request, session
 
 import auth as auth_mod
+import geoip
 import i18n
 import proxy_validator
 import settings as settings_mod
@@ -91,8 +92,6 @@ def cfg(key: str):
     return settings_store.get(key)
 
 
-# Country lookups cached across runs: each IP is queried only once.
-_country_cache: dict[str, str] = {}
 # One validation at a time (/api/refresh can trigger on demand).
 _validation_lock = threading.Lock()
 
@@ -165,41 +164,16 @@ def parse_proxy(proxy_str: str) -> dict | None:
 
 
 def fetch_countries(ips: list[str]) -> dict[str, str]:
-    """Resolve each IP's country through ip-api.com (batch endpoint, 100 per call).
+    """Resolve each IP's country from the local database.
 
-    Only queries IPs missing from `_country_cache`, so repeated runs cost almost
-    nothing. Never raises: whatever fails simply has no country and shows as
-    "Unknown".
+    Never raises: an address the database does not carry simply has no country
+    and shows as "Unknown", same as when the lookup is switched off entirely.
     """
-    known = {ip: _country_cache[ip] for ip in ips if ip in _country_cache}
     if not cfg("geolookup") or not ips:
-        return known
-
-    missing = [ip for ip in ips if ip not in _country_cache][:cfg("geolookup_max_ips")]
-    batch_size = 100
-
-    for i in range(0, len(missing), batch_size):
-        batch = missing[i:i + batch_size]
-        try:
-            resp = requests.post(
-                "http://ip-api.com/batch",
-                json=[{"query": ip, "fields": "query,country"} for ip in batch],
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                for item in resp.json():
-                    country = item.get("country")
-                    if country:
-                        _country_cache[item["query"]] = country
-                        known[item["query"]] = country
-        except Exception as exc:
-            _log(f"WARNING: country lookup failed: {exc}")
-
-        # ip-api.com allows roughly 15 batch requests per minute.
-        if i + batch_size < len(missing):
-            time.sleep(4)
-
-    return known
+        return {}
+    if not geoip.is_ready():
+        return {}
+    return geoip.lookup_many(ips)
 
 
 def latency_histogram(values: list[float], buckets: int | None = None) -> list[dict]:
@@ -345,6 +319,11 @@ def run_validation() -> None:
         _set_state(status="running", message="Validating proxies...")
         _log("Validation started")
 
+        # Before the run, so a monthly database refresh lands between cycles
+        # rather than in the middle of one.
+        if cfg("geolookup"):
+            geoip.ensure(DATA_DIR, _log)
+
         proxies = proxy_validator.fetch_proxies(cfg("proxy_sources"))
         if not proxies:
             raise RuntimeError("no source returned any proxy")
@@ -417,6 +396,12 @@ def start_background_worker() -> None:
 
     # The on-disk cache is loaded even with the scheduler off, otherwise the
     # dashboard comes up empty.
+    # Opened before the cache is loaded so the boot snapshot already carries
+    # countries. Downloading is left to the first validation cycle: blocking
+    # startup on a 4 MB fetch would delay the dashboard for no good reason.
+    if cfg("geolookup") and not geoip.open_reader(DATA_DIR, _log):
+        _log("No GeoIP database yet; countries show as Unknown until the first cycle")
+
     load_cached_proxies()
     if os.environ.get("DISABLE_SCHEDULER", "").lower() in ("1", "true", "yes"):
         _log("Scheduler disabled by DISABLE_SCHEDULER")
@@ -1034,6 +1019,11 @@ DASHBOARD_HTML = """
             font-size: 11px;
         }
         footer.foot code { color: var(--ink-dim); }
+        /* Pushed to its own line so it never competes with the live numbers,
+           while staying visible as the licence requires. */
+        footer.foot .attrib { flex-basis: 100%; opacity: 0.55; }
+        footer.foot .attrib a { color: inherit; text-decoration: none; }
+        footer.foot .attrib a:hover { text-decoration: underline; }
 
         /* Entrada escalonada dos painéis. */
         .rise { opacity: 0; transform: translateY(9px); animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
@@ -1221,6 +1211,10 @@ DASHBOARD_HTML = """
     <footer class="foot">
         <p id="foot-routes"></p>
         <p class="num" id="foot-sync"></p>
+        <!-- Required by the CC-BY 4.0 licence of the country database. Not
+             optional and not translated: the wording is the licence's. -->
+        <p class="attrib"><a href="https://db-ip.com" target="_blank"
+           rel="noopener noreferrer">IP Geolocation by DB-IP</a></p>
     </footer>
 </div>
 

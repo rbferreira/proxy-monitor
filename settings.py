@@ -64,10 +64,6 @@ SETTINGS: tuple[Setting, ...] = (
         group="geo", effect="next_cycle",
     ),
     Setting(
-        key="geolookup_max_ips", env="GEOLOOKUP_MAX_IPS", type="int", default=500,
-        minimum=0, maximum=5000, unit="IPs", group="geo", effect="next_cycle",
-    ),
-    Setting(
         key="dashboard_rows", env="DASHBOARD_ROWS", type="int", default=100,
         minimum=10, maximum=1000, unit="rows", group="dashboard",
     ),

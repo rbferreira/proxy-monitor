@@ -5,7 +5,7 @@ import pytest
 
 os.environ.setdefault("API_KEY", "test-key")
 os.environ.setdefault("DISABLE_SCHEDULER", "1")  # no scheduler during tests
-os.environ.setdefault("GEOLOOKUP", "false")      # no calls to ip-api.com
+os.environ.setdefault("GEOLOOKUP", "false")      # no GeoIP database in tests
 
 import app as app_module  # noqa: E402
 
@@ -34,7 +34,7 @@ def clean_state():
             "status": "idle",
             "message": "",
         })
-    app_module._country_cache.clear()
+    # No country cache to clear: lookups read a local database directly.
     yield
 
 

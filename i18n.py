@@ -57,15 +57,9 @@ CATALOG: dict[str, dict] = {
             },
             "geolookup": {
                 "label": "Look up IP country",
-                "description": "Resolves each IP's country through ip-api.com to feed the origin "
-                               "chart. Turned off, everything shows as Unknown and the run is "
-                               "slightly faster.",
-            },
-            "geolookup_max_ips": {
-                "label": "New IPs per cycle",
-                "description": "Cap on previously unseen IPs looked up each cycle. Known IPs are "
-                               "cached and never queried twice. ip-api.com allows roughly 15 "
-                               "batches per minute.",
+                "description": "Resolves each IP's country from a local database to feed the origin "
+                               "chart. The database is downloaded once and refreshed monthly. "
+                               "Turned off, everything shows as Unknown.",
             },
             "dashboard_rows": {
                 "label": "Table rows",
@@ -215,15 +209,9 @@ CATALOG: dict[str, dict] = {
             },
             "geolookup": {
                 "label": "Consultar país dos IPs",
-                "description": "Busca o país de cada IP no ip-api.com para alimentar o gráfico de "
-                               "origem. Desligado, todos aparecem como Unknown e a rodada fica um "
-                               "pouco mais rápida.",
-            },
-            "geolookup_max_ips": {
-                "label": "Teto de IPs novos por rodada",
-                "description": "Limite de IPs inéditos consultados a cada ciclo. IP já visto fica em "
-                               "cache e não é consultado de novo. O ip-api.com aceita cerca de 15 "
-                               "lotes por minuto.",
+                "description": "Busca o país de cada IP num banco local para alimentar o gráfico de "
+                               "origem. O banco é baixado uma vez e atualizado mensalmente. "
+                               "Desligado, todos aparecem como Unknown.",
             },
             "dashboard_rows": {
                 "label": "Linhas na tabela",

@@ -8,3 +8,7 @@ venv/
 # Runtime state: proxy cache, settings overrides, password hash and session key.
 data/
 *.local.json
+
+# Local code-graph analysis. Machine-specific absolute paths live in
+# manifest.json, so it is not commit-safe as generated.
+.graphify/

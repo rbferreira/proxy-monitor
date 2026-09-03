@@ -146,8 +146,7 @@ Everything is optional — the service runs unconfigured. Copy `.env.example` to
 | `VALIDATOR_WORKERS` | `100` | Concurrent validation threads |
 | `PROXY_SOURCES` | *(built-in)* | Initial source list, comma or newline separated. The panel overrides it |
 | `ALLOW_INTERNAL_SOURCES` | `false` | `true` permits sources on private/loopback addresses |
-| `GEOLOOKUP` | `true` | Country lookups through ip-api.com |
-| `GEOLOOKUP_MAX_IPS` | `500` | Cap on **new** IPs resolved per cycle |
+| `GEOLOOKUP` | `true` | Country lookups from a local database |
 | `PUBLIC_DASHBOARD` | `true` | `false` requires a login to view |
 | `DASHBOARD_ROWS` | `100` | Rows sent to the table |
 | `LATENCY_BUCKETS` | `12` | Histogram buckets |
@@ -198,8 +197,11 @@ The scheduler starts in a daemon thread at import, so it behaves the same under
    there would stall every HTTP request.
 4. The result is published in memory and written to `OUTPUT_FILE`.
 
-Countries come from ip-api.com in batches of 100, cached in-process so repeated
-cycles only look up IPs never seen before.
+Countries come from a local [DB-IP](https://db-ip.com) database, downloaded on the
+first cycle into the data volume and refreshed monthly. Lookups are memory-mapped
+and take microseconds, so there is no cap on how many addresses a cycle resolves and
+no third party sees the list being checked. Without the database everything simply
+reads Unknown.
 
 ## Notes
 
@@ -221,6 +223,7 @@ cycles only look up IPs never seen before.
 ├── settings.py            # Runtime settings schema, validation, persistence
 ├── auth.py                # Password, session key, brute-force protection
 ├── i18n.py                # Translation catalog (en, pt-BR)
+├── geoip.py               # Local country database: download, refresh, lookup
 ├── tests/                 # pytest
 ├── Dockerfile
 └── docker-compose.yml
@@ -229,3 +232,10 @@ cycles only look up IPs never seen before.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Attribution
+
+Country data from [DB-IP](https://db-ip.com), used under the
+[Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/).
+
+> IP Geolocation by DB-IP
