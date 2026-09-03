@@ -94,7 +94,7 @@ class TestValidateAll:
     def test_filters_out_failures(self, monkeypatch):
         """Regression: an early version tested `if fut.result():` against a tuple,
         which is always truthy — every proxy passed, including the failing ones."""
-        def fake_validate(proxy, test_urls, max_latency):
+        def fake_validate(proxy, test_urls, max_latency, samples=1):
             return (True, 0.5) if proxy.endswith(":80") else (False, None)
 
         monkeypatch.setattr(pv, "validate", fake_validate)
@@ -108,7 +108,7 @@ class TestValidateAll:
         assert pv.validate_all([]) == {}
 
     def test_worker_exception_does_not_abort_the_run(self, monkeypatch):
-        def fake_validate(proxy, test_urls, max_latency):
+        def fake_validate(proxy, test_urls, max_latency, samples=1):
             if proxy.endswith(":80"):
                 raise RuntimeError("boom")
             return (True, 1.0)
@@ -169,9 +169,110 @@ class TestValidate:
             return FakeResp()
 
         monkeypatch.setattr(pv.requests, "get", get)
-        ok, _ = pv.validate("http://1.1.1.1:80", ["https://first", "https://second"], 5.0)
+        ok, _ = pv.validate("http://1.1.1.1:80", ["https://first", "https://second"], 5.0,
+                            samples=1)
         assert ok
         assert calls == ["https://first", "https://second"]
+
+    def test_extra_samples_stay_on_the_url_that_answered(self, monkeypatch):
+        """Re-sampling must not walk back through the list: measuring two
+        different servers would report the distance between them, not the
+        proxy."""
+        class FakeResp:
+            status_code = 200
+
+        calls = []
+
+        def get(url, **kwargs):
+            calls.append(url)
+            if url == "https://first":
+                raise OSError("connection refused")
+            return FakeResp()
+
+        monkeypatch.setattr(pv.requests, "get", get)
+        ok, _ = pv.validate("http://1.1.1.1:80", ["https://first", "https://second"], 5.0,
+                            samples=3)
+        assert ok
+        assert calls == ["https://first"] + ["https://second"] * 3
+
+
+class TestLatencySamples:
+    """The median of a few samples, so one hiccup does not become a property of
+    the proxy."""
+
+    def _timed(self, monkeypatch, durations):
+        """A fake clock, so the test asserts on arithmetic rather than sleeping."""
+        class FakeResp:
+            status_code = 200
+
+        ticks = iter(range(10_000))
+        pending = list(durations)
+        now = [0.0]
+
+        def perf_counter():
+            return now[0]
+
+        def get(url, **kwargs):
+            next(ticks)
+            step = pending.pop(0)
+            if step is None:
+                raise OSError("refused")
+            now[0] += step
+            return FakeResp()
+
+        monkeypatch.setattr(pv.time, "perf_counter", perf_counter)
+        monkeypatch.setattr(pv.requests, "get", get)
+
+    def test_reports_the_median_not_the_first(self, monkeypatch):
+        self._timed(monkeypatch, [0.5, 3.0, 0.6])
+        ok, latency = pv.validate("http://1.1.1.1:80", ["https://x"], 5.0, samples=3)
+        assert ok
+        assert latency == 0.6
+
+    def test_one_outlier_does_not_drag_the_result(self, monkeypatch):
+        """A mean would report 1.37s here; the median reports what the proxy
+        actually does most of the time."""
+        self._timed(monkeypatch, [0.4, 0.4, 3.3])
+        _, latency = pv.validate("http://1.1.1.1:80", ["https://x"], 5.0, samples=3)
+        assert latency == 0.4
+
+    def test_a_single_sample_is_the_old_behaviour(self, monkeypatch):
+        self._timed(monkeypatch, [0.9])
+        ok, latency = pv.validate("http://1.1.1.1:80", ["https://x"], 5.0, samples=1)
+        assert ok and latency == 0.9
+
+    def test_a_failed_repeat_counts_against_the_proxy(self, monkeypatch):
+        """An intermittent proxy must not report the latency of its good runs
+        only. The failed sample lands at the cutoff, so the median suffers."""
+        self._timed(monkeypatch, [0.4, None, None])
+        ok, latency = pv.validate("http://1.1.1.1:80", ["https://x"], 5.0, samples=3)
+        assert ok is False and latency is None
+
+    def test_a_slow_first_look_skips_the_extra_samples(self, monkeypatch):
+        """Already over budget: more samples cannot rescue it, so do not pay."""
+        calls = []
+
+        class FakeResp:
+            status_code = 200
+
+        now = [0.0]
+
+        def get(url, **kwargs):
+            calls.append(url)
+            now[0] += 9.0
+            return FakeResp()
+
+        monkeypatch.setattr(pv.time, "perf_counter", lambda: now[0])
+        monkeypatch.setattr(pv.requests, "get", get)
+
+        ok, _ = pv.validate("http://1.1.1.1:80", ["https://x"], 5.0, samples=5)
+        assert ok is False
+        assert len(calls) == 1
+
+    def test_zero_or_negative_is_treated_as_one(self, monkeypatch):
+        self._timed(monkeypatch, [0.7])
+        ok, latency = pv.validate("http://1.1.1.1:80", ["https://x"], 5.0, samples=0)
+        assert ok and latency == 0.7
 
 
 class TestSourcesFromEnv:

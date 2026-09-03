@@ -333,6 +333,7 @@ def run_validation() -> None:
             proxy_validator.DEFAULT_TEST_URLS,
             cfg("max_latency_seconds"),
             cfg("validator_workers"),
+            samples=cfg("latency_samples"),
         )
         valid = sorted(latencies)
         duration = round(time.perf_counter() - started, 1)

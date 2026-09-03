@@ -55,6 +55,12 @@ CATALOG: dict[str, dict] = {
                 "description": "How many proxies are tested in parallel. More threads shorten the "
                                "run but open more simultaneous connections from the host.",
             },
+            "latency_samples": {
+                "label": "Latency samples",
+                "description": "How many times a passing proxy is measured, reporting the median. "
+                               "One sample turns a passing network hiccup into a property of the "
+                               "proxy. Only proxies that already passed pay for the extra requests.",
+            },
             "geolookup": {
                 "label": "Look up IP country",
                 "description": "Resolves each IP's country from a local database to feed the origin "
@@ -206,6 +212,12 @@ CATALOG: dict[str, dict] = {
                 "label": "Threads de validação",
                 "description": "Quantos proxies são testados em paralelo. Mais threads encurtam a "
                                "rodada, mas abrem mais conexões simultâneas na mesma máquina.",
+            },
+            "latency_samples": {
+                "label": "Amostras de latência",
+                "description": "Quantas vezes um proxy aprovado é medido, reportando a mediana. "
+                               "Uma amostra só transforma qualquer engasgo de rede em característica "
+                               "do proxy. Só quem já passou paga pelas requisições extras.",
             },
             "geolookup": {
                 "label": "Consultar país dos IPs",

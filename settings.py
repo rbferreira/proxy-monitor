@@ -60,6 +60,10 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1, maximum=500, group="validation", effect="next_cycle",
     ),
     Setting(
+        key="latency_samples", env="LATENCY_SAMPLES", type="int", default=3,
+        minimum=1, maximum=10, unit="samples", group="validation", effect="next_cycle",
+    ),
+    Setting(
         key="geolookup", env="GEOLOOKUP", type="bool", default=True,
         group="geo", effect="next_cycle",
     ),

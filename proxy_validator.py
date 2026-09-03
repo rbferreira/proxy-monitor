@@ -21,6 +21,7 @@ import argparse
 import ipaddress
 import os
 import socket
+import statistics
 import sys
 import threading
 import time
@@ -70,6 +71,8 @@ ALLOW_INTERNAL_SOURCES = os.environ.get("ALLOW_INTERNAL_SOURCES", "false").lower
 
 MAX_LATENCY_SECONDS = float(os.environ.get("MAX_LATENCY_SECONDS", "5.0"))
 DEFAULT_WORKERS = int(os.environ.get("VALIDATOR_WORKERS", "100"))
+# Latency samples per passing proxy. Only successes pay for the extra ones.
+DEFAULT_SAMPLES = int(os.environ.get("LATENCY_SAMPLES", "3"))
 DEFAULT_OUTPUT = "proxies.txt"
 
 # Protocols this validator knows how to test.
@@ -243,18 +246,32 @@ def validate(
     proxy: str,
     test_urls: list[str] | None = None,
     max_latency: float = MAX_LATENCY_SECONDS,
+    samples: int = DEFAULT_SAMPLES,
 ) -> tuple[bool, float | None]:
-    """Test a proxy with a real GET and measure end-to-end latency.
+    """Test a proxy with real GETs and measure end-to-end latency.
 
     Unlike `response.elapsed` — which excludes the TCP connection and the proxy
     handshake, precisely the expensive part — this times the whole request with
     `perf_counter`.
 
-    Returns `(True, latency)` when some test URL answers with status < 400
-    within `max_latency` seconds, otherwise `(False, None)`.
+    **The reported latency is a median, not a single measurement.** One sample
+    turns any passing network hiccup into a property of the proxy: a good route
+    that stalled once looks slow, and a slow one that got lucky looks fast. The
+    median of a few samples is stable against both without being dragged around
+    by one outlier the way a mean would be.
+
+    Samples are taken from the *same* URL that answered. Mixing endpoints would
+    measure the distance between two servers as much as the proxy.
+
+    Only proxies that already passed pay for the extra samples, so the cost
+    falls on the ~12% that succeed rather than on every candidate.
+
+    Returns `(True, median_latency)` when some test URL answers with status
+    < 400 within `max_latency` seconds, otherwise `(False, None)`.
     """
     if test_urls is None:
         test_urls = DEFAULT_TEST_URLS
+    samples = max(1, samples)
 
     url = to_requests_scheme(proxy)
     proxies = {"http": url, "https": url}
@@ -264,15 +281,36 @@ def validate(
     # while the real cutoff is the latency comparison below.
     req_timeout = max_latency + 1.0
 
-    for test in test_urls:
+    def measure(test: str) -> float | None:
         start = time.perf_counter()
         try:
             resp = requests.get(test, proxies=proxies, timeout=req_timeout, headers=headers)
         except Exception:
-            continue  # try the next test URL
+            return None
         latency = time.perf_counter() - start
-        if resp.status_code < 400 and latency < max_latency:
+        return latency if resp.status_code < 400 else None
+
+    for test in test_urls:
+        first = measure(test)
+        if first is None:
+            continue  # try the next test URL
+        if first >= max_latency:
+            # Over budget on the first look: no point paying for more samples
+            # to confirm it, and the next URL will not be faster.
+            return (False, None)
+
+        measured = [first]
+        for _ in range(samples - 1):
+            again = measure(test)
+            # A failed repeat is not silently dropped: it is recorded at the
+            # budget ceiling, so a proxy that answers intermittently reports a
+            # worse latency than one that answers every time.
+            measured.append(max_latency if again is None else again)
+
+        latency = statistics.median(measured)
+        if latency < max_latency:
             return (True, round(latency, 3))
+        return (False, None)
     return (False, None)
 
 
@@ -282,6 +320,7 @@ def validate_all(
     max_latency: float = MAX_LATENCY_SECONDS,
     workers: int = DEFAULT_WORKERS,
     progress: bool = False,
+    samples: int = DEFAULT_SAMPLES,
 ) -> dict[str, float]:
     """Validate a whole list in parallel. Returns `{proxy: latency}` with only
     the ones that passed. Used by both the CLI and the server."""
@@ -294,7 +333,8 @@ def validate_all(
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = {pool.submit(validate, p, test_urls, max_latency): p for p in proxies}
+        futures = {pool.submit(validate, p, test_urls, max_latency, samples): p
+                   for p in proxies}
         for fut in as_completed(futures):
             proxy = futures[fut]
             try:
