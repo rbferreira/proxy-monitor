@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-347%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-352%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.

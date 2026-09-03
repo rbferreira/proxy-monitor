@@ -1361,6 +1361,7 @@ DASHBOARD_HTML = """
                     <span class="num" id="tbl-count" style="color:var(--ink-faint)"></span></span>
                 <div class="tools">
                     <input type="search" id="filter" autocomplete="off">
+                    <button class="chip" id="chip-stable" type="button" aria-pressed="false"></button>
                     <button class="chip" id="chip-fast" type="button" aria-pressed="false"></button>
                     <button class="chip" id="chip-copy" type="button"></button>
                 </div>
@@ -1473,6 +1474,7 @@ DASHBOARD_HTML = """
         $('k-input').placeholder = t('password_placeholder');
         $('k-submit').textContent = t('sign_in');
         $('chip-fast').textContent = t('under_1s');
+        $('chip-stable').textContent = t('chip_stable');
         $('chip-copy').textContent = t('copy');
         $('btn-config').textContent = t('settings');
         $('btn-refresh').textContent = t('refresh');
@@ -2185,8 +2187,10 @@ DASHBOARD_HTML = """
     function visibleProxies() {
         const term = $('filter').value.trim().toLowerCase();
         const onlyFast = $('chip-fast').getAttribute('aria-pressed') === 'true';
+        const onlyStable = $('chip-stable').getAttribute('aria-pressed') === 'true';
         return allProxies.filter((p) => {
             if (onlyFast && !(p.latency !== null && p.latency !== undefined && p.latency < 1)) return false;
+            if (onlyStable && (p.stability || {}).state !== 'stable') return false;
             if (!term) return true;
             return [p.protocol, p.ip, p.port, p.country, p.exit_ip,
                              (p.stability || {}).state].some(
@@ -2253,11 +2257,15 @@ DASHBOARD_HTML = """
     }
 
     $('filter').addEventListener('input', renderTable);
-    $('chip-fast').addEventListener('click', (e) => {
-        const btn = e.currentTarget;
-        btn.setAttribute('aria-pressed', btn.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
-        renderTable();
-    });
+    // Both chips toggle the same way; the handler does not care which.
+    for (const id of ['chip-fast', 'chip-stable']) {
+        $(id).addEventListener('click', (e) => {
+            const btn = e.currentTarget;
+            btn.setAttribute('aria-pressed',
+                btn.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+            renderTable();
+        });
+    }
     $('chip-copy').addEventListener('click', async (e) => {
         const btn = e.currentTarget;
         const text = visibleProxies().map((p) => p.full || (p.protocol + '://' + p.ip + ':' + p.port)).join('\\n');
