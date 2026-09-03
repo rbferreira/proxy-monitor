@@ -361,10 +361,19 @@ def load_cached_proxies() -> None:
     except (OSError, ValueError):
         pass
     stamp = meta.get("last_run")
+    # Measurements come back too, not just the addresses. Rebuilding the
+    # snapshot with nothing means the dashboard shows a full list above
+    # "0s / 0s / 0s", and ?sort=latency quietly degrades to alphabetical, for
+    # the whole eight minutes until the first cycle lands.
+    latencies = {k: v for k, v in (meta.get("latencies") or {}).items()
+                 if isinstance(v, (int, float))}
+    exit_ips = {k: v for k, v in (meta.get("exit_ips") or {}).items()
+                if isinstance(v, str)}
 
-    proxy_data, stats = build_snapshot(proxies, {})
+    proxy_data, stats = build_snapshot(proxies, latencies, exit_ips)
     _set_state(
         proxies=proxies,
+        latencies=latencies,
         proxy_data=proxy_data,
         stats=stats,
         last_run=stamp,
@@ -373,6 +382,7 @@ def load_cached_proxies() -> None:
         message=f"{len(proxies)} proxies loaded from the on-disk cache (awaiting validation)",
     )
     _log(f"On-disk cache loaded: {len(proxies)} proxies"
+         + (f", {len(latencies)} with a latency" if latencies else "")
          + (f", validated at {stamp}" if stamp else ""))
 
 
@@ -451,7 +461,9 @@ def run_validation(wait: bool = False) -> None:
         )
         write_output_file(valid, {"last_run": _state["last_run"],
                                   "duration": duration,
-                                  "source_count": len(proxies)})
+                                  "source_count": len(proxies),
+                                  "latencies": latencies,
+                                  "exit_ips": exit_ips})
         _log(f"Validation finished in {duration}s: {len(valid)}/{len(proxies)} proxies valid")
     except Exception as exc:
         _set_state(status="error", message=str(exc))
