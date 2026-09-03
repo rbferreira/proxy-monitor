@@ -662,9 +662,30 @@ DASHBOARD_HTML = """
             --red: #ff5757;
 
             --gap: 14px;
+
+            /* Native UI — scrollbars, form controls, the space beyond the page —
+               follows this. Without it the browser paints a light scrollbar over
+               a near-black page, which is the first thing the eye lands on. */
+            color-scheme: dark;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        /* Firefox. Kept alongside the WebKit rules below rather than instead of
+           them: neither engine understands the other's property. */
+        html { scrollbar-width: thin; scrollbar-color: var(--rule-hi) var(--void); }
+
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: var(--void); }
+        ::-webkit-scrollbar-thumb {
+            background: var(--rule-hi);
+            border: 2px solid var(--void);   /* inset, so the bar reads as a rail */
+            border-radius: 6px;
+        }
+        ::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+        /* The little box where the two bars meet is track-coloured by default in
+           some builds and stark white in others. */
+        ::-webkit-scrollbar-corner { background: var(--void); }
 
         html { background: var(--void); }
 
@@ -1116,6 +1137,13 @@ DASHBOARD_HTML = """
         }
 
         .table-scroll { overflow: auto; max-height: 620px; }
+        /* The table scrolls inside a panel rather than against the page, so its
+           rail takes the panel colour — a --void rail would draw a dark seam up
+           the side of a lighter surface. The settings overlay is not listed
+           here: it scrolls over a dimmed page, where the default rail is right. */
+        .table-scroll::-webkit-scrollbar-track { background: var(--panel); }
+        .table-scroll::-webkit-scrollbar-thumb { border-color: var(--panel); }
+        .table-scroll { scrollbar-color: var(--rule-hi) var(--panel); }
 
         table { width: 100%; border-collapse: collapse; }
 
