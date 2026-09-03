@@ -675,3 +675,42 @@ class TestSourceGuardOverApi:
                             lambda u: (called.append(u), (True, ""))[1])
         client.post("/api/settings", json={"dashboard_rows": 40}, headers=KEY)
         assert called == []
+
+
+class TestImageContents:
+    """The Dockerfile copies an explicit file list rather than the whole tree,
+    which keeps the image small but means a new module is easy to forget. That
+    mistake does not show up until the container refuses to boot, so it is
+    worth catching here instead."""
+
+    def _dockerfile_modules(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(app_module.__file__)))
+        path = os.path.join(root, "proxy-monitor", "Dockerfile")
+        if not os.path.exists(path):
+            path = os.path.join(os.path.dirname(os.path.abspath(app_module.__file__)),
+                                "Dockerfile")
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("COPY ") and ".py" in line:
+                    return {p for p in line.split() if p.endswith(".py")}
+        raise AssertionError("no COPY line for python modules in the Dockerfile")
+
+    def test_every_local_module_app_imports_is_copied(self):
+        import ast
+
+        source_path = os.path.abspath(app_module.__file__)
+        with open(source_path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+
+        local = set()
+        source_dir = os.path.dirname(source_path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.name.split(".")[0]
+                    if os.path.exists(os.path.join(source_dir, name + ".py")):
+                        local.add(name + ".py")
+
+        copied = self._dockerfile_modules()
+        missing = local - copied
+        assert not missing, f"imported but never copied into the image: {sorted(missing)}"
