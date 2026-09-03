@@ -1055,3 +1055,59 @@ class TestTextTemplate:
         body = client.get("/proxy/all.txt?format={{full}}|{{stability}}",
                           headers=KEY).get_data(as_text=True)
         assert body.strip().endswith("|stable")
+
+
+class TestCacheKeepsWhatWeMeasured:
+    """The list survived a restart; what we knew about it did not. The
+    dashboard showed a full table above 0s/0s/0s, and ?sort=latency degraded
+    to alphabetical, for the eight minutes until the first cycle landed."""
+
+    def _write_cache(self, tmp_path, monkeypatch, meta):
+        import json as _json
+        target = tmp_path / "proxies.txt"
+        monkeypatch.setattr(app_module, "OUTPUT_FILE", str(target))
+        monkeypatch.setattr(app_module, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(app_module, "CACHE_META_FILE", str(target) + ".meta.json")
+        app_module.write_output_file(["http://1.1.1.1:80", "http://2.2.2.2:80"], meta)
+        return target
+
+    def test_latencies_come_back(self, tmp_path, monkeypatch):
+        self._write_cache(tmp_path, monkeypatch, {
+            "last_run": "2026-01-01T00:00:00Z",
+            "latencies": {"http://1.1.1.1:80": 0.4, "http://2.2.2.2:80": 2.1},
+        })
+        app_module.load_cached_proxies()
+        with app_module._lock:
+            rows = {p["full"]: p for p in app_module._state["proxy_data"]}
+            assert rows["http://1.1.1.1:80"]["latency"] == 0.4
+            assert app_module._state["stats"]["min_latency"] == 0.4
+
+    def test_exit_addresses_come_back(self, tmp_path, monkeypatch):
+        self._write_cache(tmp_path, monkeypatch, {
+            "last_run": "2026-01-01T00:00:00Z",
+            "exit_ips": {"http://1.1.1.1:80": "9.9.9.9"},
+        })
+        app_module.load_cached_proxies()
+        with app_module._lock:
+            rows = {p["full"]: p for p in app_module._state["proxy_data"]}
+            assert rows["http://1.1.1.1:80"]["exit_ip"] == "9.9.9.9"
+
+    def test_a_cache_without_measurements_still_loads(self, tmp_path, monkeypatch):
+        """Files written by the previous version carry only the three scalars."""
+        self._write_cache(tmp_path, monkeypatch, {"last_run": "2026-01-01T00:00:00Z"})
+        app_module.load_cached_proxies()
+        with app_module._lock:
+            assert len(app_module._state["proxies"]) == 2
+            assert app_module._state["stats"]["min_latency"] == 0
+
+    def test_garbage_measurements_are_ignored_not_trusted(self, tmp_path, monkeypatch):
+        self._write_cache(tmp_path, monkeypatch, {
+            "latencies": {"http://1.1.1.1:80": "fast", "http://2.2.2.2:80": 1.5},
+            "exit_ips": {"http://1.1.1.1:80": 42},
+        })
+        app_module.load_cached_proxies()
+        with app_module._lock:
+            rows = {p["full"]: p for p in app_module._state["proxy_data"]}
+            assert rows["http://1.1.1.1:80"]["latency"] is None
+            assert rows["http://1.1.1.1:80"]["exit_ip"] is None
+            assert rows["http://2.2.2.2:80"]["latency"] == 1.5
