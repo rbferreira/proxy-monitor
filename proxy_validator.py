@@ -19,6 +19,7 @@ Dependencies:
 
 import argparse
 import ipaddress
+import json
 import os
 import socket
 import statistics
@@ -27,6 +28,7 @@ import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 import requests
 
@@ -57,6 +59,20 @@ DEFAULT_TEST_URLS = [
 HTTP_TEST_URLS = [
     "http://www.gstatic.com/generate_204",
     "http://example.com",
+]
+
+# Services that echo the address a request arrived from, so a proxy can be asked
+# where its traffic actually leaves.
+#
+# **A list, not one URL.** These are the only endpoints whose answer we read
+# rather than merely count, which makes a single hardcoded one a single point of
+# failure: if it rate-limits or blocks proxy traffic, every proxy looks like it
+# has no exit address, and there is nothing in the result to say why. The first
+# that answers with a parseable address wins, cheapest first.
+IDENTITY_URLS = [
+    "https://checkip.amazonaws.com",       # bare address, 15 bytes
+    "https://icanhazip.com",               # bare address
+    "https://api.ipify.org?format=json",   # {"ip": "..."}
 ]
 
 # Source URLs pointing at the server's own network are refused by default.
@@ -314,6 +330,130 @@ def validate(
     return (False, None)
 
 
+def parse_identity(body: str) -> str | None:
+    """Pull an address out of an identity service's answer.
+
+    Two shapes are in the wild: the bare address, and a small JSON object. Try
+    the cheap one first — most of these services answer with just the address —
+    and fall back to JSON rather than requiring every endpoint to agree.
+    """
+    text = (body or "").strip()
+    if not text:
+        return None
+    try:
+        ipaddress.ip_address(text)
+        return text
+    except ValueError:
+        pass
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    candidate = data.get("ip") if isinstance(data, dict) else None
+    if not isinstance(candidate, str):
+        return None
+    try:
+        ipaddress.ip_address(candidate.strip())
+    except ValueError:
+        return None
+    return candidate.strip()
+
+
+def detect_exit_ip(
+    proxy: str,
+    timeout: float = 10.0,
+    identity_urls: list[str] | None = None,
+) -> str | None:
+    """The address a request leaves this proxy from, or None.
+
+    Knowing the proxy answered is not the same as knowing where it exits: a
+    transparent proxy forwards traffic under the caller's own address, which
+    defeats the point of using one and is invisible to a pass/fail check.
+
+    Asked only of proxies that already passed, and never fatal — an address we
+    cannot determine is left unknown rather than failing the proxy.
+    """
+    if identity_urls is None:
+        identity_urls = IDENTITY_URLS
+
+    url = to_requests_scheme(proxy)
+    proxies = {"http": url, "https": url}
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for identity in identity_urls:
+        try:
+            resp = requests.get(identity, proxies=proxies, timeout=timeout, headers=headers)
+        except Exception:
+            continue
+        if resp.status_code >= 400:
+            continue
+        found = parse_identity(resp.text)
+        if found:
+            return found
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class Result:
+    """What one proxy did when tested.
+
+    A failure is a value here, not an absence. `validate_all` only ever returned
+    the passing entries, which left the caller unable to tell "failed" from
+    "never tried" — fine for publishing a list, useless for anything that wants
+    to remember how a proxy has been behaving.
+    """
+    proxy: str
+    ok: bool
+    latency: float | None = None
+    exit_ip: str | None = None
+
+
+def validate_all_detailed(
+    proxies: list[str],
+    test_urls: list[str] | None = None,
+    max_latency: float = MAX_LATENCY_SECONDS,
+    workers: int = DEFAULT_WORKERS,
+    progress: bool = False,
+    samples: int = DEFAULT_SAMPLES,
+    with_exit_ip: bool = True,
+) -> dict[str, Result]:
+    """Validate a whole list in parallel, reporting every proxy tested.
+
+    The exit address is only asked of proxies that already passed, so the extra
+    request falls on the small fraction that succeed. It happens on the worker
+    thread that just validated, so it costs no extra parallelism.
+    """
+    results: dict[str, Result] = {}
+    if not proxies:
+        return results
+
+    total = len(proxies)
+    done = passed = 0
+
+    def check(proxy: str) -> Result:
+        ok, latency = validate(proxy, test_urls, max_latency, samples)
+        if not ok:
+            return Result(proxy, False)
+        exit_ip = detect_exit_ip(proxy) if with_exit_ip else None
+        return Result(proxy, True, latency if latency is not None else 0.0, exit_ip)
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(check, p): p for p in proxies}
+        for fut in as_completed(futures):
+            proxy = futures[fut]
+            try:
+                result = fut.result()
+            except Exception:
+                result = Result(proxy, False)
+            results[proxy] = result
+            done += 1
+            passed += 1 if result.ok else 0
+            if progress and (done % 100 == 0 or done == total):
+                print(f"      ... {done}/{total} tested | {passed} valid", flush=True)
+
+    return results
+
+
 def validate_all(
     proxies: list[str],
     test_urls: list[str] | None = None,
@@ -323,32 +463,10 @@ def validate_all(
     samples: int = DEFAULT_SAMPLES,
 ) -> dict[str, float]:
     """Validate a whole list in parallel. Returns `{proxy: latency}` with only
-    the ones that passed. Used by both the CLI and the server."""
-    results: dict[str, float] = {}
-    if not proxies:
-        return results
-
-    total = len(proxies)
-    done = 0
-    lock = threading.Lock()
-
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = {pool.submit(validate, p, test_urls, max_latency, samples): p
-                   for p in proxies}
-        for fut in as_completed(futures):
-            proxy = futures[fut]
-            try:
-                ok, latency = fut.result()
-            except Exception:
-                ok, latency = False, None
-            done += 1
-            if ok:
-                with lock:
-                    results[proxy] = latency if latency is not None else 0.0
-            if progress and (done % 100 == 0 or done == total):
-                print(f"      ... {done}/{total} tested | {len(results)} valid", flush=True)
-
-    return results
+    the ones that passed. The CLI's view, and the simplest one."""
+    detailed = validate_all_detailed(proxies, test_urls, max_latency, workers,
+                                     progress, samples, with_exit_ip=False)
+    return {p: r.latency for p, r in detailed.items() if r.ok and r.latency is not None}
 
 
 def main() -> int:

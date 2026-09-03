@@ -1,4 +1,6 @@
 """Parsing, normalization and protocol filtering."""
+import pytest
+
 import proxy_validator as pv
 
 
@@ -393,3 +395,121 @@ class TestInternalSourceGuard:
                             lambda *a, **kw: FakeResponse(b"1.1.1.1:8080\n"))
         out = pv.fetch_proxies(["http://192.168.1.1/list", "https://public.example/list"])
         assert out == ["http://1.1.1.1:8080"]
+
+
+class TestParseIdentity:
+    """Identity services answer in two shapes, and neither is negotiable."""
+
+    def test_a_bare_address(self):
+        assert pv.parse_identity("203.0.113.7\n") == "203.0.113.7"
+
+    def test_a_json_object(self):
+        assert pv.parse_identity('{"ip":"203.0.113.7"}') == "203.0.113.7"
+
+    def test_ipv6(self):
+        assert pv.parse_identity("2001:db8::1") == "2001:db8::1"
+
+    def test_an_html_error_page_is_not_an_address(self):
+        """A captive portal or an error page answers 200 with a body. Without
+        this check its text would be recorded as the exit address."""
+        assert pv.parse_identity("<html><body>Access denied</body></html>") is None
+
+    def test_json_carrying_something_that_is_not_an_address(self):
+        assert pv.parse_identity('{"ip":"not-an-ip"}') is None
+
+    def test_empty_and_whitespace(self):
+        assert pv.parse_identity("") is None
+        assert pv.parse_identity("   \n ") is None
+
+
+class TestDetectExitIp:
+    def test_returns_the_address_the_service_reports(self, monkeypatch):
+        class FakeResp:
+            status_code = 200
+            text = "203.0.113.7"
+
+        monkeypatch.setattr(pv.requests, "get", lambda url, **kw: FakeResp())
+        assert pv.detect_exit_ip("http://1.1.1.1:80") == "203.0.113.7"
+
+    def test_falls_through_when_the_first_service_is_down(self, monkeypatch):
+        """The reason the endpoint is a list: one hardcoded service that
+        rate-limits would make every proxy look like it has no exit address."""
+        seen = []
+
+        class FakeResp:
+            status_code = 200
+            text = "203.0.113.7"
+
+        def get(url, **kw):
+            seen.append(url)
+            if len(seen) == 1:
+                raise OSError("rate limited")
+            return FakeResp()
+
+        monkeypatch.setattr(pv.requests, "get", get)
+        assert pv.detect_exit_ip("http://1.1.1.1:80") == "203.0.113.7"
+        assert len(seen) == 2
+
+    def test_skips_an_error_status(self, monkeypatch):
+        class Resp:
+            def __init__(self, code, text):
+                self.status_code, self.text = code, text
+
+        answers = iter([Resp(429, "slow down"), Resp(200, "203.0.113.9")])
+        monkeypatch.setattr(pv.requests, "get", lambda url, **kw: next(answers))
+        assert pv.detect_exit_ip("http://1.1.1.1:80") == "203.0.113.9"
+
+    def test_every_service_failing_is_unknown_not_an_error(self, monkeypatch):
+        monkeypatch.setattr(pv.requests, "get",
+                            lambda url, **kw: (_ for _ in ()).throw(OSError("no route")))
+        assert pv.detect_exit_ip("http://1.1.1.1:80") is None
+
+
+class TestValidateAllDetailed:
+    """Unlike validate_all, this reports failures — which is the difference
+    between 'this proxy failed' and 'this proxy was never tried'."""
+
+    def test_failures_are_present_as_values(self, monkeypatch):
+        monkeypatch.setattr(pv, "validate",
+                            lambda p, u, m, s: (True, 0.5) if p.endswith(":80") else (False, None))
+        monkeypatch.setattr(pv, "detect_exit_ip", lambda p, **kw: "203.0.113.7")
+
+        out = pv.validate_all_detailed(["http://1.1.1.1:80", "http://2.2.2.2:9999"], workers=2)
+
+        assert out["http://1.1.1.1:80"].ok is True
+        assert out["http://2.2.2.2:9999"].ok is False
+        assert out["http://2.2.2.2:9999"].latency is None
+
+    def test_only_passing_proxies_are_asked_for_an_exit_address(self, monkeypatch):
+        """The extra request must fall on the ~12% that work, not on everything."""
+        asked = []
+        monkeypatch.setattr(pv, "validate",
+                            lambda p, u, m, s: (True, 0.5) if p.endswith(":80") else (False, None))
+        monkeypatch.setattr(pv, "detect_exit_ip", lambda p, **kw: asked.append(p) or "203.0.113.7")
+
+        pv.validate_all_detailed(
+            ["http://1.1.1.1:80", "http://2.2.2.2:9999", "http://3.3.3.3:9999"], workers=2)
+        assert asked == ["http://1.1.1.1:80"]
+
+    def test_exit_detection_can_be_switched_off(self, monkeypatch):
+        monkeypatch.setattr(pv, "validate", lambda p, u, m, s: (True, 0.5))
+        monkeypatch.setattr(pv, "detect_exit_ip",
+                            lambda p, **kw: pytest.fail("should not be called"))
+
+        out = pv.validate_all_detailed(["http://1.1.1.1:80"], with_exit_ip=False)
+        assert out["http://1.1.1.1:80"].exit_ip is None
+
+    def test_a_worker_exception_is_a_failure_not_a_gap(self, monkeypatch):
+        def boom(p, u, m, s):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(pv, "validate", boom)
+        out = pv.validate_all_detailed(["http://1.1.1.1:80"])
+        assert out["http://1.1.1.1:80"].ok is False
+
+    def test_validate_all_still_returns_only_passing_latencies(self, monkeypatch):
+        """The CLI's view must not change shape underneath it."""
+        monkeypatch.setattr(pv, "validate",
+                            lambda p, u, m, s: (True, 0.5) if p.endswith(":80") else (False, None))
+        assert pv.validate_all(["http://1.1.1.1:80", "http://2.2.2.2:9999"]) == {
+            "http://1.1.1.1:80": 0.5}

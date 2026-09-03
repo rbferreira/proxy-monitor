@@ -64,6 +64,10 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1, maximum=10, unit="samples", group="validation", effect="next_cycle",
     ),
     Setting(
+        key="detect_exit_ip", env="DETECT_EXIT_IP", type="bool", default=True,
+        group="validation", effect="next_cycle",
+    ),
+    Setting(
         key="geolookup", env="GEOLOOKUP", type="bool", default=True,
         group="geo", effect="next_cycle",
     ),

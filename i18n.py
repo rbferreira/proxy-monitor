@@ -61,6 +61,12 @@ CATALOG: dict[str, dict] = {
                                "One sample turns a passing network hiccup into a property of the "
                                "proxy. Only proxies that already passed pay for the extra requests.",
             },
+            "detect_exit_ip": {
+                "label": "Detect exit address",
+                "description": "Asks each working proxy which address its traffic leaves from. A "
+                               "transparent proxy exits under your own address, which a pass/fail "
+                               "check cannot see. Costs one extra request per working proxy.",
+            },
             "geolookup": {
                 "label": "Look up IP country",
                 "description": "Resolves each IP's country from a local database to feed the origin "
@@ -107,6 +113,7 @@ CATALOG: dict[str, dict] = {
             "col_host": "Host",
             "col_port": "Port",
             "col_latency": "Latency",
+            "col_exit": "Exit",
             "col_country": "Country",
             "filter_placeholder": "filter host / protocol / country",
             "under_1s": "< 1s",
@@ -219,6 +226,12 @@ CATALOG: dict[str, dict] = {
                                "Uma amostra só transforma qualquer engasgo de rede em característica "
                                "do proxy. Só quem já passou paga pelas requisições extras.",
             },
+            "detect_exit_ip": {
+                "label": "Detectar endereço de saída",
+                "description": "Pergunta a cada proxy funcional por qual endereço o tráfego sai. "
+                               "Proxy transparente sai com o seu próprio endereço, e uma checagem "
+                               "de passa/não-passa não enxerga isso. Custa uma requisição extra.",
+            },
             "geolookup": {
                 "label": "Consultar país dos IPs",
                 "description": "Busca o país de cada IP num banco local para alimentar o gráfico de "
@@ -264,6 +277,7 @@ CATALOG: dict[str, dict] = {
             "col_host": "Host",
             "col_port": "Porta",
             "col_latency": "Latência",
+            "col_exit": "Saída",
             "col_country": "País",
             "filter_placeholder": "filtrar host / protocolo / país",
             "under_1s": "< 1s",

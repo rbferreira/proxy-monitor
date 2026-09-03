@@ -262,8 +262,13 @@ class TestHealthDuringValidation:
             return ["http://1.1.1.1:80"]
 
         monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies", slow_fetch)
-        monkeypatch.setattr(app_module.proxy_validator, "validate_all",
-                            lambda *a, **kw: {"http://1.1.1.1:80": 0.5})
+        # Must patch what run_validation actually calls. Patching the wrong
+        # function here does not fail the test — it quietly lets it open a real
+        # connection to 1.1.1.1 and wait out the timeout.
+        monkeypatch.setattr(
+            app_module.proxy_validator, "validate_all_detailed",
+            lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
+                "http://1.1.1.1:80", True, 0.5)})
 
         t = threading.Thread(target=app_module.run_validation, daemon=True)
         t.start()

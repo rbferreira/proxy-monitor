@@ -195,11 +195,13 @@ def latency_histogram(values: list[float], buckets: int | None = None) -> list[d
     ]
 
 
-def build_snapshot(proxies: list[str], latencies: dict[str, float]) -> tuple[list[dict], dict]:
+def build_snapshot(proxies: list[str], latencies: dict[str, float],
+                   exit_ips: dict[str, str] | None = None) -> tuple[list[dict], dict]:
     """Build per-proxy metadata and the aggregate stats.
 
-    Runs **outside** `_lock` on purpose: it does network I/O (country lookups,
-    with sleeps between batches) and must not block HTTP requests meanwhile.
+    `exit_ips` maps a proxy to the address its traffic actually leaves from.
+    It is optional so the boot-time cache reload, which has no such knowledge,
+    keeps working unchanged.
     """
     empty_stats = {
         "total": 0,
@@ -214,17 +216,26 @@ def build_snapshot(proxies: list[str], latencies: dict[str, float]) -> tuple[lis
     if not proxies:
         return [], empty_stats
 
+    exit_ips = exit_ips or {}
     proxy_data = []
     for p in proxies:
         parsed = parse_proxy(p)
         if parsed:
             parsed["latency"] = latencies.get(p)
+            parsed["exit_ip"] = exit_ips.get(p)
             proxy_data.append(parsed)
 
-    unique_ips = sorted({p["ip"] for p in proxy_data if p["ip"]})
+    # Geolocate where the traffic comes out, not where the proxy is listed.
+    # For most proxies these are the same address; when they differ, the exit
+    # is the one that describes the traffic, and the difference is exactly what
+    # tells a relay apart from a transparent proxy.
+    def located_ip(entry: dict) -> str | None:
+        return entry.get("exit_ip") or entry.get("ip")
+
+    unique_ips = sorted({ip for ip in (located_ip(p) for p in proxy_data) if ip})
     countries = fetch_countries(unique_ips)
     for p in proxy_data:
-        p["country"] = countries.get(p["ip"])
+        p["country"] = countries.get(located_ip(p))
 
     by_protocol: dict[str, int] = {}
     by_country: dict[str, int] = {}
@@ -328,18 +339,22 @@ def run_validation() -> None:
         if not proxies:
             raise RuntimeError("no source returned any proxy")
 
-        latencies = proxy_validator.validate_all(
+        detailed = proxy_validator.validate_all_detailed(
             proxies,
             proxy_validator.DEFAULT_TEST_URLS,
             cfg("max_latency_seconds"),
             cfg("validator_workers"),
             samples=cfg("latency_samples"),
+            with_exit_ip=cfg("detect_exit_ip"),
         )
+        latencies = {p: r.latency for p, r in detailed.items()
+                     if r.ok and r.latency is not None}
+        exit_ips = {p: r.exit_ip for p, r in detailed.items() if r.exit_ip}
         valid = sorted(latencies)
         duration = round(time.perf_counter() - started, 1)
 
         # Country lookups and aggregation happen outside the lock (network I/O).
-        proxy_data, stats = build_snapshot(valid, latencies)
+        proxy_data, stats = build_snapshot(valid, latencies, exit_ips)
 
         _set_state(
             proxies=valid,
@@ -1004,6 +1019,12 @@ DASHBOARD_HTML = """
         .lat .bar i { position: absolute; inset: 0 auto 0 0; background: currentColor; }
         .lat .val { min-width: 50px; text-align: right; }
 
+        /* An exit equal to the listed address is written as a bare '=' so
+           the eye skips it; the addresses that actually differ are what the
+           column is for, so those are the ones that get colour. */
+        td.exit { color: var(--ink-faint); }
+        td.exit.relay { color: var(--amber); }
+
         .empty { text-align: center; padding: 46px 16px; color: var(--ink-faint); font-size: 12px; }
         .empty::after { content: '_'; animation: caret 1.1s steps(2, end) infinite; }
         @keyframes caret { 50% { opacity: 0; } }
@@ -1162,6 +1183,7 @@ DASHBOARD_HTML = """
                             <th data-t="col_host"></th>
                             <th class="r" style="width:74px" data-t="col_port"></th>
                             <th class="r" style="width:132px" data-t="col_latency"></th>
+                            <th style="width:132px" data-t="col_exit"></th>
                             <th style="width:160px" data-t="col_country"></th>
                         </tr>
                     </thead>
@@ -1970,7 +1992,7 @@ DASHBOARD_HTML = """
         return allProxies.filter((p) => {
             if (onlyFast && !(p.latency !== null && p.latency !== undefined && p.latency < 1)) return false;
             if (!term) return true;
-            return [p.protocol, p.ip, p.port, p.country].some(
+            return [p.protocol, p.ip, p.port, p.country, p.exit_ip].some(
                 (v) => v !== null && v !== undefined && String(v).toLowerCase().includes(term));
         });
     }
@@ -1981,7 +2003,7 @@ DASHBOARD_HTML = """
         $('tbl-count').textContent = '[' + rows.length + '/' + allProxies.length + ']';
 
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty">' +
+            tbody.innerHTML = '<tr><td colspan="7" class="empty">' +
                 esc(allProxies.length ? t('no_match') : t('no_nodes')) + '</td></tr>';
             return;
         }
@@ -1994,6 +2016,11 @@ DASHBOARD_HTML = """
             const latColor = !hasLat ? '#414c49'
                 : p.latency < 1 ? getVar('--teal')
                 : p.latency < MAX_LATENCY * 0.6 ? getVar('--amber') : getVar('--rose');
+            // An exit matching the listed address is the ordinary case and
+            // gets no emphasis. A different one is the interesting fact, so
+            // that is the one spelled out and highlighted.
+            const sameExit = !p.exit_ip || p.exit_ip === p.ip;
+            const exitLabel = !p.exit_ip ? '\u2014' : (sameExit ? '=' : p.exit_ip);
             return '<tr>' +
                 '<td class="rank num">' + (i + 1) + '</td>' +
                 '<td><span class="proto" style="color:' + color + '">' + esc(p.protocol) + '</span></td>' +
@@ -2003,6 +2030,8 @@ DASHBOARD_HTML = """
                     '<span class="bar"><i style="width:' + pct + '%"></i></span>' +
                     '<span class="val num">' + (hasLat ? p.latency.toFixed(2) + 's' : '\\u2014') + '</span>' +
                 '</span></td>' +
+                '<td class="exit num' + (sameExit ? '' : ' relay') + '">' +
+                    esc(exitLabel) + '</td>' +
                 '<td class="geo">' + esc(p.country || '\\u2014') + '</td>' +
                 '</tr>';
         }).join('');
