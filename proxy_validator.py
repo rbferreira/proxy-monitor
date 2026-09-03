@@ -21,6 +21,8 @@ import argparse
 import ipaddress
 import json
 import os
+import random
+import re
 import socket
 import statistics
 import sys
@@ -182,6 +184,85 @@ def normalize_proxy(line: str, default_scheme: str = "http") -> str | None:
     return f"{scheme}://{host.lower()}:{int(port)}"
 
 
+# Finds `[scheme://][user:pass@]a.b.c.d:port` anywhere in a blob of text.
+#
+# Line-based parsing only works on sources that serve one proxy per line. A
+# source that wraps its entries in HTML, or hands back JSON, yields nothing —
+# which reads as a dead source rather than one we cannot parse, and is the
+# reason adding a source used to mean checking its format first.
+#
+# IPv4 only, deliberately. Allowing hostnames would match `example.com:8080` in
+# any prose on the page, and the public lists are IPv4 in practice.
+_PROXY_RE = re.compile(
+    r"(?:(?P<scheme>https?|socks[45])://)?"
+    r"(?:[^\s:@/]{1,64}:[^\s:@/]{0,64}@)?"          # credentials, discarded
+    r"(?P<host>(?:\d{1,3}\.){3}\d{1,3})"
+    r":(?P<port>\d{1,5})",
+    re.IGNORECASE,
+)
+
+
+def _is_dialable(host: str) -> bool:
+    """True for an address it is reasonable to try to reach as a proxy.
+
+    Literal addresses only, so no DNS is involved and this stays free to call
+    thousands of times per cycle.
+    """
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def extract_proxies(text: str, default_scheme: str = "http") -> list[str]:
+    """Every proxy in a blob of text, whatever wraps it.
+
+    Bounds are checked rather than left to the pattern: `999.1.2.3:70000` matches
+    the shape and is not an address. A match butting against a digit or a dot on
+    either side is skipped too, so `1.2.3.4.5:80` and a version string do not
+    become proxies.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+
+    for match in _PROXY_RE.finditer(text or ""):
+        start, end = match.span()
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+        if before.isdigit() or before == "." or after.isdigit() or after == ".":
+            continue
+        # Sitting immediately after `://` means this is the host of a URL whose
+        # scheme the pattern did not recognise. Taking it would turn
+        # `ftp://1.2.3.4:21` into an HTTP proxy pointed at the FTP port.
+        if not match.group("scheme") and text[max(0, start - 3):start] == "://":
+            continue
+
+        host, port = match.group("host"), match.group("port")
+        if any(int(octet) > 255 for octet in host.split(".")):
+            continue
+        if not 0 < int(port) < 65536:
+            continue
+        # A source can name any address it likes, and the validator would dial
+        # it. `169.254.169.254:80` in a public list is a cloud metadata endpoint,
+        # not a proxy; `10.0.0.1:8080` is somebody's router. The same flag that
+        # permits an internal source URL permits these, because it means the same
+        # thing: I am deliberately pointing this at my own network.
+        if not ALLOW_INTERNAL_SOURCES and not _is_dialable(host):
+            continue
+
+        scheme = (match.group("scheme") or default_scheme).lower()
+        if scheme not in KNOWN_SCHEMES:
+            continue
+
+        proxy = f"{scheme}://{host}:{int(port)}"
+        if proxy not in seen:
+            seen.add(proxy)
+            found.append(proxy)
+    return found
+
+
 def scheme_for_source(url: str) -> str:
     """Protocol assumed for sources that return bare `ip:port` lines.
 
@@ -209,6 +290,40 @@ def scheme_for_source(url: str) -> str:
     return "http"
 
 
+# Attempts per source, and the base for the exponential backoff between them.
+#
+# **Sources are retried; proxies are not.** Retrying a proxy that just failed
+# spends a worker slot on something almost certainly dead. Retrying a source is
+# the opposite: one flaky host costs a whole cycle's worth of its candidates,
+# and with six sources that can be a third of the input.
+SOURCE_ATTEMPTS = 3
+SOURCE_BACKOFF_SECONDS = 1.5
+
+
+def fetch_source(url: str, timeout: int = 30,
+                 attempts: int = SOURCE_ATTEMPTS) -> str | None:
+    """Body of one source, retrying with backoff. None when it never answered.
+
+    The delay is jittered so six sources failing at once do not retry in
+    lockstep and hit the same host together.
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    last = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            last = exc
+            if attempt < attempts:
+                delay = SOURCE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                time.sleep(delay * (0.5 + random.random()))
+    print(f"WARNING: could not fetch {url} after {attempts} attempts: {last}",
+          file=sys.stderr, flush=True)
+    return None
+
+
 def fetch_proxies(source_urls: list[str] | None = None) -> list[str]:
     """Download every source and return unique, normalized proxies.
 
@@ -219,29 +334,20 @@ def fetch_proxies(source_urls: list[str] | None = None) -> list[str]:
         source_urls = sources_from_env() or PROXY_SOURCES
 
     all_proxies: set[str] = set()
-    headers = {"User-Agent": "Mozilla/5.0"}
 
     for url in source_urls:
         allowed, reason = source_is_allowed(url)
         if not allowed:
             print(f"WARNING: skipping {url}: {reason}", file=sys.stderr, flush=True)
             continue
-        default_scheme = scheme_for_source(url)
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
-        except Exception as exc:
-            print(f"WARNING: could not fetch {url}: {exc}", file=sys.stderr, flush=True)
+        text = fetch_source(url)
+        if text is None:
             continue
 
-        found = 0
-        for line in text.splitlines():
-            proxy = normalize_proxy(line, default_scheme)
-            if proxy:
-                all_proxies.add(proxy)
-                found += 1
-        print(f"      {found} proxies from {url.split('?')[0]}", file=sys.stderr, flush=True)
+        found = extract_proxies(text, scheme_for_source(url))
+        all_proxies.update(found)
+        print(f"      {len(found)} proxies from {url.split('?')[0]}",
+              file=sys.stderr, flush=True)
 
     return sorted(all_proxies)
 

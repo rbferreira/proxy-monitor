@@ -555,3 +555,152 @@ class TestDefaultSources:
 
     def test_every_default_is_an_https_url(self):
         assert all(u.startswith("https://") for u in pv.PROXY_SOURCES)
+
+
+class TestExtractProxies:
+    """Line-based parsing only reads sources that serve one proxy per line. A
+    source wrapping its entries in HTML yielded nothing, which looks like a dead
+    source rather than one we could not parse."""
+
+    def test_a_plain_list(self):
+        assert pv.extract_proxies("1.2.3.4:8080\n5.6.7.8:3128") == [
+            "http://1.2.3.4:8080", "http://5.6.7.8:3128"]
+
+    def test_an_inline_scheme_wins_over_the_default(self):
+        assert pv.extract_proxies("socks5://5.6.7.8:1080", "http") == [
+            "socks5://5.6.7.8:1080"]
+
+    def test_the_default_applies_when_there_is_none(self):
+        assert pv.extract_proxies("5.6.7.8:1080", "socks5") == ["socks5://5.6.7.8:1080"]
+
+    def test_html(self):
+        html = '<table><tr><td><a href="/x">45.10.0.1:8080</a></td></tr></table>'
+        assert pv.extract_proxies(html) == ["http://45.10.0.1:8080"]
+
+    def test_json(self):
+        blob = '{"data":[{"proxy":"11.22.33.44:9999"},{"proxy":"55.66.77.88:80"}]}'
+        assert pv.extract_proxies(blob) == [
+            "http://11.22.33.44:9999", "http://55.66.77.88:80"]
+
+    def test_credentials_are_dropped_not_kept(self):
+        """Nothing downstream can use them, and carrying a password into a
+        published list would be worse than losing the entry."""
+        assert pv.extract_proxies("http://user:pw@45.10.113.5:8080") == [
+            "http://45.10.113.5:8080"]
+
+    def test_duplicates_collapse_in_order(self):
+        assert pv.extract_proxies("1.2.3.4:80\n1.2.3.4:80\n5.6.7.8:80") == [
+            "http://1.2.3.4:80", "http://5.6.7.8:80"]
+
+    def test_an_impossible_octet_is_not_an_address(self):
+        assert pv.extract_proxies("999.1.2.3:80") == []
+
+    def test_a_port_out_of_range(self):
+        assert pv.extract_proxies("1.2.3.4:70000") == []
+        assert pv.extract_proxies("1.2.3.4:0") == []
+
+    def test_a_longer_number_is_not_an_address(self):
+        """`1.2.3.4.5:80` contains a valid-looking address; taking it would
+        invent a proxy out of something that is not one."""
+        assert pv.extract_proxies("1.2.3.4.5:80") == []
+        assert pv.extract_proxies("11.2.3.4:80.5") == []
+
+    def test_an_unknown_scheme_is_skipped(self):
+        assert pv.extract_proxies("ftp://1.2.3.4:21") == []
+
+    def test_empty_and_none(self):
+        assert pv.extract_proxies("") == []
+        assert pv.extract_proxies(None) == []
+
+    def test_an_error_page_yields_nothing(self):
+        page = "<html><body><h1>429 Too Many Requests</h1></body></html>"
+        assert pv.extract_proxies(page) == []
+
+
+class TestFetchSourceRetry:
+    """Sources are retried; proxies are not. Retrying a dead proxy spends a
+    worker slot on nothing, while one flaky source costs a whole cycle's worth
+    of its candidates."""
+
+    def test_a_transient_failure_is_retried(self, monkeypatch):
+        calls = []
+
+        class FakeResp:
+            def read(self):
+                return b"1.2.3.4:8080"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def urlopen(req, timeout=30):
+            calls.append(1)
+            if len(calls) < 3:
+                raise OSError("connection reset")
+            return FakeResp()
+
+        monkeypatch.setattr(pv.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(pv.time, "sleep", lambda s: None)
+
+        assert pv.fetch_source("https://x/list") == "1.2.3.4:8080"
+        assert len(calls) == 3
+
+    def test_it_gives_up_and_says_so(self, monkeypatch):
+        monkeypatch.setattr(pv.urllib.request, "urlopen",
+                            lambda req, timeout=30: (_ for _ in ()).throw(OSError("down")))
+        monkeypatch.setattr(pv.time, "sleep", lambda s: None)
+        assert pv.fetch_source("https://x/list", attempts=2) is None
+
+    def test_a_first_try_success_does_not_sleep(self, monkeypatch):
+        slept = []
+
+        class FakeResp:
+            def read(self):
+                return b"1.2.3.4:8080"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(pv.urllib.request, "urlopen", lambda req, timeout=30: FakeResp())
+        monkeypatch.setattr(pv.time, "sleep", slept.append)
+        pv.fetch_source("https://x/list")
+        assert slept == []
+
+    def test_one_dead_source_does_not_lose_the_others(self, monkeypatch):
+        def fake_fetch(url, timeout=30, attempts=3):
+            return None if "dead" in url else "1.2.3.4:8080"
+
+        monkeypatch.setattr(pv, "fetch_source", fake_fetch)
+        monkeypatch.setattr(pv, "source_is_allowed", lambda u: (True, ""))
+        out = pv.fetch_proxies(["https://dead/list", "https://live/list"])
+        assert out == ["http://1.2.3.4:8080"]
+
+
+class TestAddressesWeRefuseToDial:
+    """A source names any address it likes and the validator would dial it.
+    Making sources easy to add makes this worth guarding, not less."""
+
+    def test_a_metadata_endpoint_is_not_a_proxy(self):
+        assert pv.extract_proxies("169.254.169.254:80") == []
+
+    def test_private_ranges(self):
+        for addr in ("10.0.0.1:8080", "192.168.1.1:3128", "172.16.0.1:8080"):
+            assert pv.extract_proxies(addr) == [], addr
+
+    def test_loopback_and_unspecified(self):
+        assert pv.extract_proxies("127.0.0.1:8080") == []
+        assert pv.extract_proxies("0.0.0.0:80") == []
+
+    def test_public_addresses_still_pass(self):
+        assert pv.extract_proxies("8.8.8.8:3128") == ["http://8.8.8.8:3128"]
+
+    def test_the_internal_flag_permits_them(self, monkeypatch):
+        """Same flag as internal source URLs, because it means the same thing:
+        I am deliberately pointing this at my own network."""
+        monkeypatch.setattr(pv, "ALLOW_INTERNAL_SOURCES", True)
+        assert pv.extract_proxies("10.0.0.1:8080") == ["http://10.0.0.1:8080"]
