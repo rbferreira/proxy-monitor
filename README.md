@@ -105,8 +105,8 @@ never touches the schema.
 | `GET /api/stats` | — | Aggregate metrics and the fastest proxies |
 | `GET /api/auth` | — | Session state |
 | `POST /api/login` | — | `{"password": "..."}` opens a session |
-| `GET /proxy/all` | 🔑 | Full list as JSON |
-| `GET /proxy/all.txt` | 🔑 | Same list in plain text, one per line |
+| `GET /proxy/all` | 🔑 | Full list as JSON. `?types=` filters protocols, `?stable=true` restricts to proxies with a stable verdict |
+| `GET /proxy/all.txt` | 🔑 | Same list in plain text, one per line. Same `?types=` and `?stable=` |
 | `POST /api/refresh` | 🔑 | Revalidate now (`202`, or `409` if already running) |
 | `POST /api/logout` | 🔑 | End the session |
 | `POST /api/password` | 🔑 | `{"current": "...", "new": "..."}` |
@@ -144,6 +144,13 @@ Everything is optional — the service runs unconfigured. Copy `.env.example` to
 | `INTERVAL_SECONDS` | `1200` | Seconds between full revalidations |
 | `MAX_LATENCY_SECONDS` | `5.0` | Health cutoff |
 | `VALIDATOR_WORKERS` | `100` | Concurrent validation threads |
+| `LATENCY_SAMPLES` | `3` | Measurements per passing proxy; the median is reported |
+| `DETECT_EXIT_IP` | `true` | Ask each working proxy which address its traffic leaves from |
+| `STABILITY_ENABLED` | `true` | Re-check the working list to learn what keeps working |
+| `RECHECK_SECONDS` | `120` | How often the working list is re-tested |
+| `STABILITY_MIN_CHECKS` | `5` | Re-checks needed before a proxy is judged at all |
+| `STABILITY_MIN_SUCCESS_RATE` | `0.8` | Share of recent checks a stable proxy must pass |
+| `PUBLISH_STABLE_ONLY` | `false` | Restrict the served lists to stable proxies |
 | `PROXY_SOURCES` | *(built-in)* | Initial source list, comma or newline separated. The panel overrides it |
 | `ALLOW_INTERNAL_SOURCES` | `false` | `true` permits sources on private/loopback addresses |
 | `GEOLOOKUP` | `true` | Country lookups from a local database |
@@ -203,6 +210,33 @@ and take microseconds, so there is no cap on how many addresses a cycle resolves
 no third party sees the list being checked. Without the database everything simply
 reads Unknown.
 
+## Stability
+
+A single check per cycle says a proxy answered once. It does not say the proxy
+can be relied on, and publishing both with the same confidence is how a list
+ends up churning most of its entries every cycle.
+
+So a second loop re-tests **only the currently working list** every
+`RECHECK_SECONDS`, and each proxy accumulates a short history. A proxy is called
+stable once it has enough recent checks, passes enough of them, and is passing
+right now — that last rule is what stops a proxy with a great record but
+currently dead from being advertised.
+
+Three states, and the third one matters: **`unknown` is not `unstable`.** A proxy
+nobody has measured yet has failed nothing, and reporting it as unstable would be
+a claim the service cannot support. History older than a few re-check intervals
+also reverts to `unknown`, so a service that was down comes back saying it does
+not know rather than repeating a verdict from expired evidence.
+
+Nothing is filtered by default. `?stable=true` narrows a request, and
+`PUBLISH_STABLE_ONLY` makes that the default for every request — except while
+still warming up, where it declines to hand back an empty list, because a
+monitoring service answering 200 with zero proxies after a deploy gets blamed
+for an outage it did not cause.
+
+Measured here: of 309 proxies a full cycle called valid, around 140 answer on any
+given re-check and roughly 75 earn a stable verdict.
+
 ## Notes
 
 - The container runs **one worker** on purpose: the scheduler and the proxy
@@ -224,6 +258,7 @@ reads Unknown.
 ├── auth.py                # Password, session key, brute-force protection
 ├── i18n.py                # Translation catalog (en, pt-BR)
 ├── geoip.py               # Local country database: download, refresh, lookup
+├── stability.py           # Per-proxy history and the stable/unstable verdict
 ├── tests/                 # pytest
 ├── Dockerfile
 └── docker-compose.yml

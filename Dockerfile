@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY proxy_validator.py settings.py auth.py i18n.py geoip.py app.py ./
+COPY proxy_validator.py settings.py auth.py i18n.py geoip.py stability.py app.py ./
 
 ENV PYTHONUNBUFFERED=1 \
     OUTPUT_FILE=/data/proxies.txt

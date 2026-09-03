@@ -35,6 +35,9 @@ def clean_state():
             "message": "",
         })
     # No country cache to clear: lookups read a local database directly.
+    # The stability store is global, so samples recorded by one test would
+    # otherwise decide the verdict seen by the next.
+    app_module.stability_store.clear()
     yield
 
 
@@ -719,3 +722,175 @@ class TestImageContents:
         copied = self._dockerfile_modules()
         missing = local - copied
         assert not missing, f"imported but never copied into the image: {sorted(missing)}"
+
+
+class TestStabilityWiring:
+    """The store reaching the API and the dashboard."""
+
+    def test_rows_carry_a_verdict(self, client):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.5})
+        row = client.get("/api/stats").get_json()["proxies"][0]
+        assert "stability" in row
+        assert row["stability"]["state"] in ("unknown", "unstable", "stable")
+
+    def test_an_unmeasured_proxy_reports_unknown_not_unstable(self, client):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.5})
+        row = client.get("/api/stats").get_json()["proxies"][0]
+        assert row["stability"]["state"] == "unknown"
+
+    def test_stats_count_the_states(self, client):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.5})
+        stats = client.get("/api/stats").get_json()["stats"]
+        for field in ("stable", "unstable", "unknown"):
+            assert field in stats
+
+    def test_stats_expose_the_recheck_cadence(self, client):
+        data = client.get("/api/stats").get_json()
+        for field in ("last_check", "next_check", "recheck_seconds", "stability_enabled"):
+            assert field in data
+
+
+class TestStableFilter:
+    def _seed_mixed(self):
+        good, bad = "http://1.1.1.1:80", "http://2.2.2.2:80"
+        seed([good, bad], {good: 0.4, bad: 0.4})
+        for _ in range(6):
+            app_module.stability_store.record(good, 0.4)
+            app_module.stability_store.record(bad, None)
+        return good, bad
+
+    def test_unfiltered_by_default(self, client):
+        """The upgrade must not change what an existing consumer receives."""
+        good, bad = self._seed_mixed()
+        body = client.get("/proxy/all", headers=KEY).get_json()
+        assert set(body["proxies"]) == {good, bad}
+        assert body["stable_only"] is False
+
+    def test_stable_true_narrows_the_list(self, client):
+        good, _ = self._seed_mixed()
+        body = client.get("/proxy/all?stable=true", headers=KEY).get_json()
+        assert body["proxies"] == [good]
+        assert body["stable_only"] is True
+
+    def test_the_text_endpoint_filters_too(self, client):
+        good, _ = self._seed_mixed()
+        resp = client.get("/proxy/all.txt?stable=true", headers=KEY)
+        assert resp.get_data(as_text=True).strip() == good
+
+    def test_warming_up_does_not_empty_the_list(self, client):
+        """Answering 200 with zero proxies for ten minutes after every deploy
+        gets the service blamed for an outage it did not cause."""
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.4})
+        app_module.stability_store.record("http://1.1.1.1:80", 0.4)
+
+        body = client.get("/proxy/all?stable=true", headers=KEY).get_json()
+        assert body["proxies"] == ["http://1.1.1.1:80"]
+        assert body["stable_only"] is False
+        assert body["stability"]["warming_up"] is True
+
+    def test_once_judged_an_empty_stable_list_is_reported_as_such(self, client):
+        """The other half of the rule: the warm-up escape must not mask a real
+        'everything died'."""
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.4})
+        for _ in range(6):
+            app_module.stability_store.record("http://1.1.1.1:80", None)
+
+        body = client.get("/proxy/all?stable=true", headers=KEY).get_json()
+        assert body["proxies"] == []
+        assert body["stable_only"] is True
+        assert body["stability"]["warming_up"] is False
+
+    def test_the_query_parameter_overrides_the_setting_both_ways(self, client, isolated_settings):
+        good, _ = self._seed_mixed()
+        isolated_settings.apply({"publish_stable_only": True})
+
+        narrowed = client.get("/proxy/all", headers=KEY).get_json()
+        assert narrowed["proxies"] == [good]
+
+        widened = client.get("/proxy/all?stable=false", headers=KEY).get_json()
+        assert len(widened["proxies"]) == 2
+
+
+class TestRecheckLoop:
+    def test_it_skips_while_a_full_cycle_holds_the_lock(self):
+        """Queuing would re-test proxies checked seconds earlier, and bias every
+        window toward the moment just after discovery."""
+        app_module._validation_lock.acquire()
+        try:
+            assert app_module.recheck_once() is False
+        finally:
+            app_module._validation_lock.release()
+
+    def test_nothing_to_recheck_is_not_an_error(self):
+        assert app_module.recheck_once() is False
+
+    def test_it_records_samples_and_republishes(self, monkeypatch):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.9})
+        monkeypatch.setattr(
+            app_module.proxy_validator, "validate_all_detailed",
+            lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
+                "http://1.1.1.1:80", True, 0.3)})
+
+        assert app_module.recheck_once() is True
+        with app_module._lock:
+            assert app_module._state["proxy_data"][0]["latency"] == 0.3
+            assert app_module._state["last_check"] is not None
+
+    def test_it_leaves_the_discovery_fields_alone(self, monkeypatch):
+        """The published list is a discovery artifact; a re-check annotates it
+        and must not claim a new scan happened."""
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.9})
+        app_module._set_state(last_run="2026-01-01T00:00:00Z", duration=42.0,
+                              source_count=3000)
+        monkeypatch.setattr(
+            app_module.proxy_validator, "validate_all_detailed",
+            lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
+                "http://1.1.1.1:80", False)})
+
+        app_module.recheck_once()
+        with app_module._lock:
+            assert app_module._state["last_run"] == "2026-01-01T00:00:00Z"
+            assert app_module._state["duration"] == 42.0
+            assert app_module._state["source_count"] == 3000
+            assert app_module._state["proxies"] == ["http://1.1.1.1:80"]
+
+    def test_a_failed_recheck_counts_against_the_proxy(self, monkeypatch):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.9})
+        monkeypatch.setattr(
+            app_module.proxy_validator, "validate_all_detailed",
+            lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
+                "http://1.1.1.1:80", False)})
+
+        app_module.recheck_once()
+        view = app_module.stability_store.view("http://1.1.1.1:80")
+        assert view["checks"] == 1
+        assert view["success_rate"] == 0.0
+
+
+class TestStabilityDisabled:
+    def test_everything_reports_unknown(self, client, isolated_settings):
+        """Off must look like 'nothing was measured', never like 'nothing is
+        stable' — the second is a claim, and a false one."""
+        isolated_settings.apply({"stability_enabled": False})
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.4})
+        for _ in range(6):
+            app_module.stability_store.record("http://1.1.1.1:80", 0.4)
+
+        row = client.get("/api/stats").get_json()["proxies"][0]
+        assert row["stability"]["state"] == "unknown"
+
+    def test_the_filter_becomes_a_no_op(self, client, isolated_settings):
+        isolated_settings.apply({"stability_enabled": False})
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.4})
+        body = client.get("/proxy/all?stable=true", headers=KEY).get_json()
+        assert body["proxies"] == ["http://1.1.1.1:80"]
+
+
+class TestSchedulerGating:
+    def test_disable_scheduler_stops_both_loops(self):
+        """The suite sets DISABLE_SCHEDULER=1. If the re-check loop ignored it,
+        every pytest run would open real connections to the internet."""
+        import threading
+        running = {t.name for t in threading.enumerate()}
+        assert "proxy-recheck" not in running
+        assert "proxy-validator" not in running

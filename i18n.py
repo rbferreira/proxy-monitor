@@ -27,6 +27,7 @@ CATALOG: dict[str, dict] = {
             "sources": "Proxy sources",
             "validation": "Validation",
             "geo": "Geolocation",
+            "stability": "Stability",
             "dashboard": "Dashboard",
             "security": "Security",
         },
@@ -73,6 +74,36 @@ CATALOG: dict[str, dict] = {
                                "chart. The database is downloaded once and refreshed monthly. "
                                "Turned off, everything shows as Unknown.",
             },
+            "stability_enabled": {
+                "label": "Track stability",
+                "description": "Re-checks the working list on a short cycle to learn which proxies "
+                               "keep working, instead of trusting a single check. Turned off, "
+                               "every proxy reports as unknown and the extra loop stops.",
+            },
+            "recheck_seconds": {
+                "label": "Re-check interval",
+                "description": "How often the currently working list is re-tested. Only that list, "
+                               "so a pass is quick. This is what decides how fast a proxy earns a "
+                               "verdict: at 120s, five checks take ten minutes.",
+            },
+            "stability_min_checks": {
+                "label": "Checks before judging",
+                "description": "How many re-checks a proxy needs before it is called anything. "
+                               "Below this it reports as unknown rather than unstable, because "
+                               "nothing has been measured yet and a guess would read as a verdict.",
+            },
+            "stability_min_success_rate": {
+                "label": "Minimum success rate",
+                "description": "Share of recent checks a proxy must pass to be called stable, from "
+                               "0 to 1. Free proxies are flaky at the margins, so 1.0 leaves almost "
+                               "nothing qualifying.",
+            },
+            "publish_stable_only": {
+                "label": "Publish stable only",
+                "description": "Restricts the served lists to proxies that earned a stable verdict. "
+                               "Off by default so nothing changes on upgrade; the endpoints also "
+                               "accept ?stable=true or ?stable=false to override per request.",
+            },
             "dashboard_rows": {
                 "label": "Table rows",
                 "description": "How many proxies, fastest first, the table receives. Does not "
@@ -113,6 +144,18 @@ CATALOG: dict[str, dict] = {
             "col_host": "Host",
             "col_port": "Port",
             "col_latency": "Latency",
+            "col_stability": "Stable",
+            "chip_stable": "stable",
+            "stability_stable": "stable",
+            "stability_unstable": "unstable",
+            "stability_unknown": "unknown",
+            "stability_warmup": "warming up {done}/{total}",
+            "stability_since": "stable for {duration}",
+            "blocker_checks": "not enough checks yet",
+            "blocker_stale": "no recent check",
+            "blocker_rate": "fails too often",
+            "blocker_streak": "failing right now",
+            "stable_count": "{count} stable",
             "col_exit": "Exit",
             "col_country": "Country",
             "filter_placeholder": "filter host / protocol / country",
@@ -191,6 +234,7 @@ CATALOG: dict[str, dict] = {
             "sources": "Fontes de proxy",
             "validation": "Validação",
             "geo": "Geolocalização",
+            "stability": "Estabilidade",
             "dashboard": "Dashboard",
             "security": "Segurança",
         },
@@ -238,6 +282,36 @@ CATALOG: dict[str, dict] = {
                                "origem. O banco é baixado uma vez e atualizado mensalmente. "
                                "Desligado, todos aparecem como Unknown.",
             },
+            "stability_enabled": {
+                "label": "Acompanhar estabilidade",
+                "description": "Revalida a lista funcional num ciclo curto para descobrir quais "
+                               "proxies continuam de pé, em vez de confiar numa checagem só. "
+                               "Desligado, todos ficam como desconhecido e o laço extra para.",
+            },
+            "recheck_seconds": {
+                "label": "Intervalo de revalidação",
+                "description": "De quanto em quanto tempo a lista atual é retestada. Só ela, então "
+                               "a passada é rápida. É isso que decide a velocidade do veredito: a "
+                               "120s, cinco checagens levam dez minutos.",
+            },
+            "stability_min_checks": {
+                "label": "Checagens antes do veredito",
+                "description": "Quantas revalidações um proxy precisa antes de ser classificado. "
+                               "Abaixo disso ele aparece como desconhecido, não instável, porque "
+                               "ninguém mediu nada ainda e um palpite viraria veredito.",
+            },
+            "stability_min_success_rate": {
+                "label": "Taxa mínima de sucesso",
+                "description": "Fração das checagens recentes que o proxy precisa passar para ser "
+                               "chamado de estável, de 0 a 1. Proxy público falha nas bordas, então "
+                               "1.0 deixa quase nada qualificado.",
+            },
+            "publish_stable_only": {
+                "label": "Publicar só os estáveis",
+                "description": "Restringe as listas servidas aos proxies com veredito de estável. "
+                               "Desligado por padrão para nada mudar na atualização; os endpoints "
+                               "também aceitam ?stable=true ou ?stable=false por requisição.",
+            },
             "dashboard_rows": {
                 "label": "Linhas na tabela",
                 "description": "Quantos proxies, do mais rápido para o mais lento, a tabela recebe. "
@@ -277,6 +351,18 @@ CATALOG: dict[str, dict] = {
             "col_host": "Host",
             "col_port": "Porta",
             "col_latency": "Latência",
+            "col_stability": "Estável",
+            "chip_stable": "estáveis",
+            "stability_stable": "estável",
+            "stability_unstable": "instável",
+            "stability_unknown": "desconhecido",
+            "stability_warmup": "aquecendo {done}/{total}",
+            "stability_since": "estável há {duration}",
+            "blocker_checks": "ainda faltam checagens",
+            "blocker_stale": "sem checagem recente",
+            "blocker_rate": "falha demais",
+            "blocker_streak": "falhando agora",
+            "stable_count": "{count} estáveis",
             "col_exit": "Saída",
             "col_country": "País",
             "filter_placeholder": "filtrar host / protocolo / país",

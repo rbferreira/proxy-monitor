@@ -25,6 +25,7 @@ import geoip
 import i18n
 import proxy_validator
 import settings as settings_mod
+import stability as stability_mod
 
 OUTPUT_FILE = os.environ.get("OUTPUT_FILE", "/data/proxies.txt")
 DATA_DIR = os.path.dirname(OUTPUT_FILE) or "."
@@ -65,6 +66,8 @@ _state = {
     "proxy_data": [],    # dicts with metadata (protocol/ip/port/latency/country)
     "last_run": None,    # ISO 8601 of the last successful validation
     "next_run": None,    # ISO 8601 estimate of the next one
+    "last_check": None,  # ISO 8601 of the last re-check pass
+    "next_check": None,  # ISO 8601 estimate of the next re-check
     "duration": None,    # seconds the last validation took
     "source_count": 0,   # raw proxies downloaded from the sources
     "status": "idle",    # idle | running | ok | error
@@ -74,6 +77,9 @@ _state = {
         "healthy": 0,
         "by_protocol": {},
         "by_country": {},
+        "stable": 0,
+        "unstable": 0,
+        "unknown": 0,
         "latency_buckets": [],
         "avg_latency": 0,
         "min_latency": 0,
@@ -92,8 +98,23 @@ def cfg(key: str):
     return settings_store.get(key)
 
 
-# One validation at a time (/api/refresh can trigger on demand).
+def stability_policy() -> stability_mod.Policy:
+    """Built from the live settings on every read, so changing a threshold
+    in the panel re-judges the existing history instead of waiting for new
+    samples to accumulate under the new rule."""
+    return stability_mod.Policy(
+        min_checks=cfg("stability_min_checks"),
+        min_success_rate=cfg("stability_min_success_rate"),
+    )
+
+
+# One validation at a time (/api/refresh can trigger on demand). The
+# re-check loop takes the same lock, non-blocking, and skips rather than
+# queues: a queued pass would run the instant a full cycle finished, on
+# proxies tested seconds earlier.
 _validation_lock = threading.Lock()
+
+stability_store = stability_mod.Store(os.path.join(DATA_DIR, "stability.json"))
 
 _api_key: str = ""
 
@@ -208,6 +229,9 @@ def build_snapshot(proxies: list[str], latencies: dict[str, float],
         "healthy": 0,
         "by_protocol": {},
         "by_country": {},
+        "stable": 0,
+        "unstable": 0,
+        "unknown": 0,
         "latency_buckets": latency_histogram([]),
         "avg_latency": 0,
         "min_latency": 0,
@@ -234,34 +258,66 @@ def build_snapshot(proxies: list[str], latencies: dict[str, float],
 
     unique_ips = sorted({ip for ip in (located_ip(p) for p in proxy_data) if ip})
     countries = fetch_countries(unique_ips)
+    verdicts = stability_snapshot([p["full"] for p in proxy_data])
     for p in proxy_data:
         p["country"] = countries.get(located_ip(p))
+        p["stability"] = verdicts.get(p["full"])
 
+    return proxy_data, aggregate_stats(proxy_data)
+
+
+def aggregate_stats(proxy_data: list[dict]) -> dict:
+    """Roll rows up into the dashboard's summary. Sorts `proxy_data` in place.
+
+    Split out of `build_snapshot` because it does no I/O: the re-check loop
+    refreshes latencies and verdicts every couple of minutes and must not pay
+    for a country lookup to republish numbers it already has.
+    """
     by_protocol: dict[str, int] = {}
     by_country: dict[str, int] = {}
+    by_stability: dict[str, int] = {}
     latency_values: list[float] = []
 
     for p in proxy_data:
         by_protocol[p["protocol"]] = by_protocol.get(p["protocol"], 0) + 1
         country = p.get("country") or "Unknown"
         by_country[country] = by_country.get(country, 0) + 1
+        state = (p.get("stability") or {}).get("state") or stability_mod.UNKNOWN
+        by_stability[state] = by_stability.get(state, 0) + 1
         if p.get("latency") is not None:
             latency_values.append(p["latency"])
 
     # Fastest first; the ones with no measurement go last.
     proxy_data.sort(key=lambda p: (p["latency"] is None, p["latency"] or 0))
 
-    stats = {
+    return {
         "latency_buckets": latency_histogram(latency_values),
         "total": len(proxy_data),
         "healthy": len(proxy_data),
         "by_protocol": dict(sorted(by_protocol.items(), key=lambda kv: -kv[1])),
         "by_country": dict(sorted(by_country.items(), key=lambda kv: -kv[1])),
+        "stable": by_stability.get(stability_mod.STABLE, 0),
+        "unstable": by_stability.get(stability_mod.UNSTABLE, 0),
+        "unknown": by_stability.get(stability_mod.UNKNOWN, 0),
         "avg_latency": round(sum(latency_values) / len(latency_values), 2) if latency_values else 0,
         "min_latency": round(min(latency_values), 2) if latency_values else 0,
         "max_latency": round(max(latency_values), 2) if latency_values else 0,
     }
-    return proxy_data, stats
+
+
+def stability_snapshot(proxies: list[str]) -> dict[str, dict]:
+    """Verdicts for a set of proxies, or a uniform unknown when tracking is off.
+
+    Off must look like "nothing has been measured", not like "nothing is
+    stable" — the second is a claim, and a false one.
+    """
+    if not cfg("stability_enabled"):
+        unknown = {"state": stability_mod.UNKNOWN, "checks": 0, "success_rate": None,
+                   "streak": 0, "median_latency": None, "spread": None,
+                   "stable_for": None, "blockers": ["checks"]}
+        return {p: dict(unknown) for p in proxies}
+    stability_store.policy = stability_policy()
+    return stability_store.snapshot(proxies)
 
 
 def write_output_file(proxies: list[str], meta: dict | None = None) -> None:
@@ -350,6 +406,16 @@ def run_validation() -> None:
         latencies = {p: r.latency for p, r in detailed.items()
                      if r.ok and r.latency is not None}
         exit_ips = {p: r.exit_ip for p, r in detailed.items() if r.exit_ip}
+
+        # Only proxies already being tracked, plus the ones that just passed.
+        # Recording all ~3000 candidates would fill the history with entries
+        # nothing will ever probe again.
+        if cfg("stability_enabled"):
+            tracked = set(stability_store.snapshot()) | set(latencies)
+            stability_store.record_batch(
+                {p: latencies.get(p) for p in tracked if p in detailed})
+            stability_store.prune()
+            stability_store.save()
         valid = sorted(latencies)
         duration = round(time.perf_counter() - started, 1)
 
@@ -377,6 +443,70 @@ def run_validation() -> None:
         _log(f"Validation error: {exc}")
     finally:
         _validation_lock.release()
+
+
+def recheck_once() -> bool:
+    """Re-test the currently valid list and republish the verdicts.
+
+    Deliberately narrow: it refreshes latencies, verdicts and the aggregate
+    numbers, and touches nothing that describes discovery — `proxies`,
+    `last_run`, `duration`, `source_count` and the on-disk list all belong to
+    the full cycle. So the published list stays a discovery artifact and only
+    the annotations move.
+    """
+    if not _validation_lock.acquire(blocking=False):
+        return False  # a full cycle is running and already producing samples
+    try:
+        with _lock:
+            targets = list(_state["proxies"])
+            rows = [dict(p) for p in _state["proxy_data"]]
+        if not targets:
+            return False
+
+        detailed = proxy_validator.validate_all_detailed(
+            targets,
+            proxy_validator.DEFAULT_TEST_URLS,
+            cfg("max_latency_seconds"),
+            cfg("validator_workers"),
+            samples=cfg("latency_samples"),
+            with_exit_ip=False,   # the exit address does not move between passes
+        )
+        fresh = {p: (r.latency if r.ok else None) for p, r in detailed.items()}
+        stability_store.policy = stability_policy()
+        stability_store.record_batch(fresh)
+        stability_store.prune()
+
+        verdicts = stability_snapshot(targets)
+        for row in rows:
+            latency = fresh.get(row["full"])
+            if latency is not None:
+                row["latency"] = latency
+            row["stability"] = verdicts.get(row["full"])
+
+        # aggregate_stats, not build_snapshot: the row set has not changed, so
+        # redoing the country lookups would be pure waste.
+        stats = aggregate_stats(rows)
+        alive = sum(1 for v in fresh.values() if v is not None)
+        _set_state(proxy_data=rows, stats=stats, last_check=_now(),
+                   next_check=datetime.fromtimestamp(
+                       time.time() + cfg("recheck_seconds"), timezone.utc).isoformat())
+        _log(f"Re-check: {alive}/{len(targets)} still answering")
+        return True
+    except Exception as exc:
+        _log(f"Re-check failed: {exc}")
+        return False
+    finally:
+        _validation_lock.release()
+        stability_store.save()
+
+
+def recheck_loop() -> None:
+    """Runs beside the discovery cycle. Re-reads its interval each pass so a
+    change in the panel applies without a restart."""
+    while True:
+        if cfg("stability_enabled"):
+            recheck_once()
+        time.sleep(max(30, cfg("recheck_seconds")))
 
 
 def scheduler_loop() -> None:
@@ -418,11 +548,16 @@ def start_background_worker() -> None:
     if cfg("geolookup") and not geoip.open_reader(DATA_DIR, _log):
         _log("No GeoIP database yet; countries show as Unknown until the first cycle")
 
+    stability_store.load()
+    if len(stability_store):
+        _log(f"Stability history restored for {len(stability_store)} proxies")
+
     load_cached_proxies()
     if os.environ.get("DISABLE_SCHEDULER", "").lower() in ("1", "true", "yes"):
         _log("Scheduler disabled by DISABLE_SCHEDULER")
         return
     threading.Thread(target=scheduler_loop, daemon=True, name="proxy-validator").start()
+    threading.Thread(target=recheck_loop, daemon=True, name="proxy-recheck").start()
 
 
 def current_locale() -> str:
@@ -1024,6 +1159,7 @@ DASHBOARD_HTML = """
            column is for, so those are the ones that get colour. */
         td.exit { color: var(--ink-faint); }
         td.exit.relay { color: var(--amber); }
+        td.stb { font-size: 11px; letter-spacing: 0.04em; }
 
         .empty { text-align: center; padding: 46px 16px; color: var(--ink-faint); font-size: 12px; }
         .empty::after { content: '_'; animation: caret 1.1s steps(2, end) infinite; }
@@ -1184,6 +1320,7 @@ DASHBOARD_HTML = """
                             <th class="r" style="width:74px" data-t="col_port"></th>
                             <th class="r" style="width:132px" data-t="col_latency"></th>
                             <th style="width:132px" data-t="col_exit"></th>
+                            <th style="width:118px" data-t="col_stability"></th>
                             <th style="width:160px" data-t="col_country"></th>
                         </tr>
                     </thead>
@@ -1249,6 +1386,9 @@ DASHBOARD_HTML = """
     const LOCALE = "{{ locale }}";
     const MAX_LATENCY = Number("{{ max_latency }}") || 5;
     const INTERVAL_MIN = Number("{{ interval_min }}") || 20;
+    // Refreshed from /api/stats so changing the threshold in the panel is
+    // reflected in the warm-up counter without a reload.
+    let MIN_CHECKS = 5;
 
     const REFRESH_MS = 30000;
     const ACTION_TIMEOUT_MS = 15000;
@@ -1844,6 +1984,7 @@ DASHBOARD_HTML = """
 
     function render(data) {
         const st = data.stats || {};
+        MIN_CHECKS = data.stability_min_checks || MIN_CHECKS;
         const labels = {
             ok: t('status_ok'), running: t('status_running'),
             error: t('status_error'), idle: t('status_idle'),
@@ -1992,9 +2133,20 @@ DASHBOARD_HTML = """
         return allProxies.filter((p) => {
             if (onlyFast && !(p.latency !== null && p.latency !== undefined && p.latency < 1)) return false;
             if (!term) return true;
-            return [p.protocol, p.ip, p.port, p.country, p.exit_ip].some(
+            return [p.protocol, p.ip, p.port, p.country, p.exit_ip,
+                             (p.stability || {}).state].some(
                 (v) => v !== null && v !== undefined && String(v).toLowerCase().includes(term));
         });
+    }
+
+    // A proxy still gathering evidence shows its progress rather than a
+    // verdict: '3/5' reads as a countdown, where 'unknown' reads as a
+    // problem and is indistinguishable from one that genuinely fails.
+    function stabilityLabel(st) {
+        if (st.state === 'stable') return t('stability_stable');
+        if (st.state === 'unstable') return t('stability_unstable');
+        if (st.blockers && st.blockers.indexOf('stale') !== -1) return '\u2014';
+        return t('stability_warmup', {done: st.checks || 0, total: MIN_CHECKS});
     }
 
     function renderTable() {
@@ -2003,7 +2155,7 @@ DASHBOARD_HTML = """
         $('tbl-count').textContent = '[' + rows.length + '/' + allProxies.length + ']';
 
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="7" class="empty">' +
+            tbody.innerHTML = '<tr><td colspan="8" class="empty">' +
                 esc(allProxies.length ? t('no_match') : t('no_nodes')) + '</td></tr>';
             return;
         }
@@ -2019,6 +2171,12 @@ DASHBOARD_HTML = """
             // An exit matching the listed address is the ordinary case and
             // gets no emphasis. A different one is the interesting fact, so
             // that is the one spelled out and highlighted.
+            const st = p.stability || {state: 'unknown', checks: 0};
+            const stColor = st.state === 'stable' ? getVar('--teal')
+                : st.state === 'unstable' ? getVar('--rose') : '#414c49';
+            const stText = stabilityLabel(st);
+            const stTitle = (st.blockers || []).map(function (b) {
+                return t('blocker_' + b) || b; }).join(' · ');
             const sameExit = !p.exit_ip || p.exit_ip === p.ip;
             const exitLabel = !p.exit_ip ? '\u2014' : (sameExit ? '=' : p.exit_ip);
             return '<tr>' +
@@ -2032,6 +2190,8 @@ DASHBOARD_HTML = """
                 '</span></td>' +
                 '<td class="exit num' + (sameExit ? '' : ' relay') + '">' +
                     esc(exitLabel) + '</td>' +
+                '<td class="stb" style="color:' + stColor + '" title="' +
+                    esc(stTitle) + '">' + esc(stText) + '</td>' +
                 '<td class="geo">' + esc(p.country || '\\u2014') + '</td>' +
                 '</tr>';
         }).join('');
@@ -2096,15 +2256,74 @@ def api_stats():
             "source_count": _state["source_count"],
             "max_latency": cfg("max_latency_seconds"),
             "interval_seconds": cfg("interval_seconds"),
+            "last_check": _state["last_check"],
+            "next_check": _state["next_check"],
+            "recheck_seconds": cfg("recheck_seconds"),
+            "stability_min_checks": cfg("stability_min_checks"),
+            "stability_enabled": bool(cfg("stability_enabled")),
             "stats": _state["stats"],
             "proxies": _state["proxy_data"][:cfg("dashboard_rows")],
         })
+
+
+def stability_counts() -> dict:
+    """How the published list breaks down by verdict.
+
+    Sent alongside a filtered list so a consumer receiving nothing can tell
+    "not judged yet" from "nothing qualifies" — the difference between a
+    service that just started and one whose proxies are all dead.
+    """
+    if not cfg("stability_enabled"):
+        return {"enabled": False}
+    with _lock:
+        proxies = list(_state["proxies"])
+    stability_store.policy = stability_policy()
+    counts = stability_store.counts(proxies)
+    return {
+        "enabled": True,
+        "stable": counts[stability_mod.STABLE],
+        "unstable": counts[stability_mod.UNSTABLE],
+        "unknown": counts[stability_mod.UNKNOWN],
+        "warming_up": stability_store.warming_up(proxies),
+    }
 
 
 def _requested_types() -> list[str] | None:
     """`?types=http,socks5` — None means every protocol."""
     raw = request.args.get("types", "").strip()
     return [t for t in raw.split(",") if t.strip()] if raw else None
+
+
+def _stable_only() -> bool:
+    """Whether the served list should be restricted to stable proxies.
+
+    The query parameter wins in both directions: someone who turned the setting
+    on can still pull everything with ?stable=false to see what was filtered,
+    and a consumer can opt in without touching server configuration.
+    """
+    raw = request.args.get("stable", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return bool(cfg("publish_stable_only"))
+
+
+def apply_stable_filter(proxies: list[str]) -> tuple[list[str], bool]:
+    """(list, filtered). Refuses to empty the list while still warming up.
+
+    A monitoring service that answers 200 with zero proxies for ten minutes
+    after every deploy gets blamed for an outage it did not cause. Gating on
+    warm-up means this never masks a genuine "everything died": once verdicts
+    exist, an empty stable list is reported as an empty stable list.
+    """
+    if not proxies or not _stable_only() or not cfg("stability_enabled"):
+        return proxies, False
+    stability_store.policy = stability_policy()
+    stable = stability_store.stable_only(proxies)
+    if not stable and stability_store.warming_up(proxies):
+        return proxies, False
+    return stable, True
 
 
 @app.get("/proxy/all")
@@ -2116,12 +2335,15 @@ def proxy_all():
         last_run, status, message = _state["last_run"], _state["status"], _state["message"]
     if types:
         proxies = proxy_validator.filter_by_type(proxies, types)
+    proxies, filtered = apply_stable_filter(proxies)
     return jsonify({
         "count": len(proxies),
         "last_run": last_run,
         "status": status,
         "message": message,
         "types": types,
+        "stable_only": filtered,
+        "stability": stability_counts(),
         "proxies": proxies,
     })
 
@@ -2138,6 +2360,7 @@ def proxy_all_txt():
         proxies = list(_state["proxies"])
     if types:
         proxies = proxy_validator.filter_by_type(proxies, types)
+    proxies, _filtered = apply_stable_filter(proxies)
     body = "\n".join(proxies) + ("\n" if proxies else "")
     return body, 200, {"Content-Type": "text/plain; charset=utf-8"}
 

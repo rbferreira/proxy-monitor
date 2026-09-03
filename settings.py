@@ -72,6 +72,26 @@ SETTINGS: tuple[Setting, ...] = (
         group="geo", effect="next_cycle",
     ),
     Setting(
+        key="stability_enabled", env="STABILITY_ENABLED", type="bool", default=True,
+        group="stability",
+    ),
+    Setting(
+        key="recheck_seconds", env="RECHECK_SECONDS", type="int", default=120,
+        minimum=30, maximum=3600, unit="s", group="stability",
+    ),
+    Setting(
+        key="stability_min_checks", env="STABILITY_MIN_CHECKS", type="int", default=5,
+        minimum=1, maximum=50, unit="checks", group="stability",
+    ),
+    Setting(
+        key="stability_min_success_rate", env="STABILITY_MIN_SUCCESS_RATE",
+        type="float", default=0.8, minimum=0.0, maximum=1.0, group="stability",
+    ),
+    Setting(
+        key="publish_stable_only", env="PUBLISH_STABLE_ONLY", type="bool", default=False,
+        group="stability",
+    ),
+    Setting(
         key="dashboard_rows", env="DASHBOARD_ROWS", type="int", default=100,
         minimum=10, maximum=1000, unit="rows", group="dashboard",
     ),
