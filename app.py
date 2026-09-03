@@ -376,9 +376,24 @@ def load_cached_proxies() -> None:
          + (f", validated at {stamp}" if stamp else ""))
 
 
-def run_validation() -> None:
-    """Run the validator and publish the result. One run at a time."""
-    if not _validation_lock.acquire(blocking=False):
+# How long a scheduled cycle waits for the lock. Comfortably longer than a
+# re-check pass, short enough that a genuinely stuck run does not swallow the
+# scheduler thread forever.
+_LOCK_WAIT_SECONDS = 300
+
+
+def run_validation(wait: bool = False) -> None:
+    """Run the validator and publish the result. One run at a time.
+
+    `wait` is what separates the two callers. The scheduled cycle waits: the
+    lock is usually held by a re-check pass that finishes inside a minute, while
+    the next scheduled slot is twenty minutes away, so skipping means the
+    published list ages for twice as long as configured. A manual trigger does
+    not wait, so `/api/refresh` can answer at once that something is running.
+    """
+    acquired = (_validation_lock.acquire(timeout=_LOCK_WAIT_SECONDS) if wait
+                else _validation_lock.acquire(blocking=False))
+    if not acquired:
         _log("Validation already running, trigger ignored")
         return
     try:
@@ -511,12 +526,12 @@ def recheck_loop() -> None:
 
 def scheduler_loop() -> None:
     """Validate immediately, then every `interval_seconds`."""
-    run_validation()
+    run_validation(wait=True)
     while True:
         # Re-read each pass so changing the interval from the panel applies to
         # the very next cycle, with no restart.
         time.sleep(cfg("interval_seconds"))
-        run_validation()
+        run_validation(wait=True)
 
 
 def start_background_worker() -> None:

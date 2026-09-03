@@ -894,3 +894,60 @@ class TestSchedulerGating:
         running = {t.name for t in threading.enumerate()}
         assert "proxy-recheck" not in running
         assert "proxy-validator" not in running
+
+
+class TestScheduledCycleWaits:
+    """Regression: the scheduled cycle used the same non-blocking acquire as a
+    manual trigger, so whenever a re-check pass held the lock the cycle was
+    dropped and the next one was twenty minutes away. Observed in production —
+    the published list aged 40 minutes instead of 20, and the stable count
+    decayed because nothing replaced the dead proxies."""
+
+    def test_a_scheduled_cycle_waits_for_a_recheck_to_finish(self, monkeypatch):
+        import threading
+
+        monkeypatch.setattr(app_module, "_LOCK_WAIT_SECONDS", 5)
+        monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
+                            lambda sources=None: ["http://1.1.1.1:80"])
+        monkeypatch.setattr(
+            app_module.proxy_validator, "validate_all_detailed",
+            lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
+                "http://1.1.1.1:80", True, 0.5)})
+
+        app_module._validation_lock.acquire()
+        released = threading.Event()
+
+        def hold_briefly():
+            released.wait(timeout=2)
+            app_module._validation_lock.release()
+
+        holder = threading.Thread(target=hold_briefly, daemon=True)
+        holder.start()
+        released.set()
+
+        app_module.run_validation(wait=True)
+        holder.join(timeout=5)
+
+        with app_module._lock:
+            assert app_module._state["last_run"] is not None
+
+    def test_a_manual_trigger_still_refuses_to_wait(self, monkeypatch):
+        """/api/refresh must answer at once rather than block the request."""
+        calls = []
+        monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
+                            lambda sources=None: calls.append(1) or [])
+
+        app_module._validation_lock.acquire()
+        try:
+            app_module.run_validation()
+        finally:
+            app_module._validation_lock.release()
+        assert calls == []
+
+    def test_the_scheduler_asks_to_wait(self):
+        """The wiring, not just the capability: a scheduler calling the default
+        would reintroduce the bug silently."""
+        import inspect
+        source = inspect.getsource(app_module.scheduler_loop)
+        assert "run_validation(wait=True)" in source
+        assert "\n        run_validation()" not in source
