@@ -1111,3 +1111,35 @@ class TestCacheKeepsWhatWeMeasured:
             assert rows["http://1.1.1.1:80"]["latency"] is None
             assert rows["http://1.1.1.1:80"]["exit_ip"] is None
             assert rows["http://2.2.2.2:80"]["latency"] == 1.5
+
+
+class TestBadgeStaysHonest:
+    """The README claims a test count, and a number in a document drifts on the
+    very next commit. It drifted twice before this test existed."""
+
+    def test_the_readme_badge_matches_the_suite(self):
+        import ast
+        import glob
+        import re
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(app_module.__file__)))
+        readme = os.path.join(root, "proxy-monitor", "README.md")
+        if not os.path.exists(readme):
+            readme = os.path.join(os.path.dirname(os.path.abspath(app_module.__file__)),
+                                  "README.md")
+        with open(readme, encoding="utf-8") as f:
+            claimed = re.search(r"tests-(\d+)%20passing", f.read())
+        assert claimed, "no test badge in the README"
+
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        actual = 0
+        for path in glob.glob(os.path.join(tests_dir, "test_*.py")):
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            actual += sum(
+                1 for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_"))
+
+        assert int(claimed.group(1)) == actual, (
+            f"README says {claimed.group(1)} tests, the suite has {actual}")
