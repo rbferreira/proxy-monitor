@@ -2337,6 +2337,105 @@ def _requested_types() -> list[str] | None:
     return [t for t in raw.split(",") if t.strip()] if raw else None
 
 
+def _requested_countries() -> set[str] | None:
+    """`?country=BR,US` — None means every country.
+
+    Matched against the country name we resolved, case-insensitively, so
+    `?country=brazil` and `?country=Brazil` both work. Two-letter codes are not
+    accepted because the database we read gives names, and silently matching
+    nothing would be worse than saying so.
+    """
+    raw = request.args.get("country", "").strip()
+    if not raw:
+        return None
+    wanted = {c.strip().lower() for c in raw.split(",") if c.strip()}
+    return wanted or None
+
+
+def _country_index() -> dict[str, str]:
+    """proxy -> country, from the rows the last snapshot built."""
+    with _lock:
+        return {p["full"]: (p.get("country") or "") for p in _state["proxy_data"]}
+
+
+def apply_country_filter(proxies: list[str]) -> list[str]:
+    wanted = _requested_countries()
+    if not wanted:
+        return proxies
+    index = _country_index()
+    return [p for p in proxies if index.get(p, "").lower() in wanted]
+
+
+# Quality first, not speed first.
+#
+# Sorting by latency alone puts a fast proxy that fails half the time above a
+# dependable one that is a little slower — which is backwards for a consumer
+# taking the first N off the list. State leads, then how often it actually
+# works, then speed as the tie-breaker.
+_STATE_RANK = {stability_mod.STABLE: 0, stability_mod.UNKNOWN: 1,
+               stability_mod.UNSTABLE: 2}
+
+
+def sort_by_quality(proxies: list[str]) -> list[str]:
+    verdicts = stability_snapshot(proxies)
+    with _lock:
+        latencies = dict(_state["latencies"])
+
+    def key(proxy: str):
+        view = verdicts.get(proxy) or {}
+        rate = view.get("success_rate")
+        return (
+            _STATE_RANK.get(view.get("state"), 1),
+            -(rate if rate is not None else 0.0),
+            latencies.get(proxy) if latencies.get(proxy) is not None else 999.0,
+            proxy,
+        )
+
+    return sorted(proxies, key=key)
+
+
+def order_for_request(proxies: list[str]) -> list[str]:
+    """`?sort=quality` (default), `latency`, or `stable` for a diff-friendly order.
+
+    The stable order exists because a list that reshuffles on every request is
+    painful to diff — a consumer watching for real changes should not have to
+    filter out reordering noise.
+    """
+    how = request.args.get("sort", "").strip().lower()
+    if how == "stable":
+        return sorted(proxies)
+    if how == "latency":
+        with _lock:
+            latencies = dict(_state["latencies"])
+        return sorted(proxies, key=lambda p: (latencies.get(p) is None,
+                                              latencies.get(p) or 0, p))
+    return sort_by_quality(proxies)
+
+
+# Placeholders a consumer can arrange in the plain-text output.
+_TEMPLATE_FIELDS = ("protocol", "ip", "port", "full", "latency", "country",
+                    "exit_ip", "stability")
+
+
+def render_line(proxy: str, template: str, row: dict | None) -> str:
+    """One output line, with `{{field}}` filled in from the snapshot row."""
+    row = row or {}
+    values = {
+        "protocol": proxy.split("://", 1)[0],
+        "ip": row.get("ip") or proxy.split("://", 1)[1].rsplit(":", 1)[0],
+        "port": row.get("port") or proxy.rsplit(":", 1)[1],
+        "full": proxy,
+        "latency": "" if row.get("latency") is None else row["latency"],
+        "country": row.get("country") or "",
+        "exit_ip": row.get("exit_ip") or "",
+        "stability": (row.get("stability") or {}).get("state") or "",
+    }
+    line = template
+    for field in _TEMPLATE_FIELDS:
+        line = line.replace("{{" + field + "}}", str(values[field]))
+    return line
+
+
 def _stable_only() -> bool:
     """Whether the served list should be restricted to stable proxies.
 
@@ -2379,6 +2478,7 @@ def proxy_all():
     if types:
         proxies = proxy_validator.filter_by_type(proxies, types)
     proxies, filtered = apply_stable_filter(proxies)
+    proxies = order_for_request(apply_country_filter(proxies))
     return jsonify({
         "count": len(proxies),
         "last_run": last_run,
@@ -2404,7 +2504,22 @@ def proxy_all_txt():
     if types:
         proxies = proxy_validator.filter_by_type(proxies, types)
     proxies, _filtered = apply_stable_filter(proxies)
-    body = "\n".join(proxies) + ("\n" if proxies else "")
+    proxies = order_for_request(apply_country_filter(proxies))
+
+    template = request.args.get("format", "").strip()
+    if template:
+        with _lock:
+            rows = {p["full"]: dict(p) for p in _state["proxy_data"]}
+        # The verdict is read live rather than off the row: a row is built once
+        # per discovery cycle, and the re-check loop moves the verdict several
+        # times in between.
+        verdicts = stability_snapshot(proxies)
+        for proxy in proxies:
+            rows.setdefault(proxy, {})["stability"] = verdicts.get(proxy)
+        lines = [render_line(p, template, rows.get(p)) for p in proxies]
+    else:
+        lines = proxies
+    body = "\n".join(lines) + ("\n" if lines else "")
     return body, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 
