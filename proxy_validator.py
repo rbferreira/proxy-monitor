@@ -33,11 +33,18 @@ from dataclasses import dataclass
 import requests
 
 # Default sources. Override with the PROXY_SOURCES env var (see `sources_from_env`).
+#
+# **More than one provider on purpose.** Four endpoints of the same API is one
+# provider wearing four hats: if it changes its interface or goes down, the
+# service has no input at all. These two lists come from elsewhere and carry the
+# protocol inline, so nothing has to be guessed about their entries.
 PROXY_SOURCES = [
     "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text",
     "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&ssl=all&anonymity=all",
     "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000",
     "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
 ]
 
 # Test URLs: the first one answering with status < 400 marks the proxy as good.
@@ -176,9 +183,28 @@ def normalize_proxy(line: str, default_scheme: str = "http") -> str | None:
 
 
 def scheme_for_source(url: str) -> str:
-    """Protocol assumed for sources that return bare `ip:port` lines."""
+    """Protocol assumed for sources that return bare `ip:port` lines.
+
+    Only a guess, and only for lines with no scheme of their own — an inline
+    `socks5://` in the source always wins.
+
+    Two conventions are honoured. Query APIs say `?protocol=socks5`; file-based
+    lists say it in the name, as `socks5.txt` or `proxies-socks5.txt`. Reading
+    only the query parameter meant every entry of a `socks5.txt` was tested as
+    HTTP and failed, which looks like a dead source rather than a wrong guess.
+    """
+    lowered = url.lower()
     for scheme in ("socks5", "socks4", "https"):
-        if f"protocol={scheme}" in url:
+        if f"protocol={scheme}" in lowered:
+            return scheme
+
+    # The filename, not the whole path: a list under /socks5-archive/ whose file
+    # is named http.txt is an HTTP list, and the name is the more specific claim.
+    filename = lowered.split("?", 1)[0].rstrip("/").rpartition("/")[2]
+    stem = filename.rpartition(".")[0] or filename
+    words = set(stem.replace("-", " ").replace("_", " ").replace(".", " ").split())
+    for scheme in ("socks5", "socks4"):
+        if scheme in words:
             return scheme
     return "http"
 

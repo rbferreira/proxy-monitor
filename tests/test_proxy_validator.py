@@ -513,3 +513,45 @@ class TestValidateAllDetailed:
                             lambda p, u, m, s: (True, 0.5) if p.endswith(":80") else (False, None))
         assert pv.validate_all(["http://1.1.1.1:80", "http://2.2.2.2:9999"]) == {
             "http://1.1.1.1:80": 0.5}
+
+
+class TestSchemeFromFilename:
+    """File-based lists name their protocol in the filename, not a query
+    parameter. Reading only the parameter meant every entry of a socks5.txt was
+    tested as HTTP and failed, which reads as a dead source rather than a wrong
+    guess about it."""
+
+    def test_a_socks_filename_is_honoured(self):
+        base = "https://raw.githubusercontent.com/x/PROXY-List/master/"
+        assert pv.scheme_for_source(base + "socks5.txt") == "socks5"
+        assert pv.scheme_for_source(base + "socks4.txt") == "socks4"
+        assert pv.scheme_for_source(base + "http.txt") == "http"
+
+    def test_a_compound_filename_still_works(self):
+        assert pv.scheme_for_source(
+            "https://x/online-proxies/txt/proxies-socks5.txt") == "socks5"
+
+    def test_the_filename_beats_the_directory(self):
+        """The name is the more specific claim about what is inside."""
+        assert pv.scheme_for_source("https://x/socks5-archive/http.txt") == "http"
+
+    def test_the_query_parameter_still_wins(self):
+        assert pv.scheme_for_source("https://x/list.txt?protocol=socks4") == "socks4"
+
+    def test_an_extensionless_path_works(self):
+        assert pv.scheme_for_source("https://x/socks5") == "socks5"
+
+    def test_an_unrelated_name_stays_http(self):
+        assert pv.scheme_for_source("https://x/proxies/all/data.txt") == "http"
+
+
+class TestDefaultSources:
+    def test_more_than_one_provider(self):
+        """Four endpoints of one API is a single point of failure wearing four
+        hats: one interface change and there is no input at all."""
+        from urllib.parse import urlparse
+        hosts = {urlparse(u).netloc for u in pv.PROXY_SOURCES}
+        assert len(hosts) > 1
+
+    def test_every_default_is_an_https_url(self):
+        assert all(u.startswith("https://") for u in pv.PROXY_SOURCES)
