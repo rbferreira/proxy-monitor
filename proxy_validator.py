@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -324,30 +325,55 @@ def fetch_source(url: str, timeout: int = 30,
     return None
 
 
-def fetch_proxies(source_urls: list[str] | None = None) -> list[str]:
+def _report(callback: Callable | None, *args) -> None:
+    """Call a progress callback, and never let it take a run down.
+
+    Progress is telemetry. A reporter that raises — a state write into a
+    dashboard, a closure over something that went away — must not cost the ten
+    minutes of validation already paid for.
+    """
+    if callback is None:
+        return
+    try:
+        callback(*args)
+    except Exception:
+        pass
+
+
+def fetch_proxies(source_urls: list[str] | None = None,
+                  on_source: Callable[[int, int, int], None] | None = None) -> list[str]:
     """Download every source and return unique, normalized proxies.
 
     A failing source only produces a warning — whatever the other sources
     returned is kept.
+
+    `on_source` is called after each source with `(done, total, found)`, where
+    `found` counts the unique proxies gathered so far. It fires for skipped and
+    failing sources too, so `done` always reaches `total` — a progress reading
+    that stalls on a dead source would describe the reporter, not the run.
     """
     if source_urls is None:
         source_urls = sources_from_env() or PROXY_SOURCES
 
     all_proxies: set[str] = set()
+    total = len(source_urls)
 
-    for url in source_urls:
+    for done, url in enumerate(source_urls, start=1):
         allowed, reason = source_is_allowed(url)
         if not allowed:
             print(f"WARNING: skipping {url}: {reason}", file=sys.stderr, flush=True)
+            _report(on_source, done, total, len(all_proxies))
             continue
         text = fetch_source(url)
         if text is None:
+            _report(on_source, done, total, len(all_proxies))
             continue
 
         found = extract_proxies(text, scheme_for_source(url))
         all_proxies.update(found)
         print(f"      {len(found)} proxies from {url.split('?')[0]}",
               file=sys.stderr, flush=True)
+        _report(on_source, done, total, len(all_proxies))
 
     return sorted(all_proxies)
 
@@ -548,12 +574,19 @@ def validate_all_detailed(
     progress: bool = False,
     samples: int = DEFAULT_SAMPLES,
     with_exit_ip: bool = True,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> dict[str, Result]:
     """Validate a whole list in parallel, reporting every proxy tested.
 
     The exit address is only asked of proxies that already passed, so the extra
     request falls on the small fraction that succeed. It happens on the worker
     thread that just validated, so it costs no extra parallelism.
+
+    Two ways to watch it go. `progress=True` prints a line every hundred
+    proxies, which is the CLI's view. `on_progress` is called with
+    `(done, total, passed)` after every single result, from this thread rather
+    than a worker, so a caller can publish it somewhere without locking
+    anything of its own.
     """
     results: dict[str, Result] = {}
     if not proxies:
@@ -580,6 +613,7 @@ def validate_all_detailed(
             results[proxy] = result
             done += 1
             passed += 1 if result.ok else 0
+            _report(on_progress, done, total, passed)
             if progress and (done % 100 == 0 or done == total):
                 print(f"      ... {done}/{total} tested | {passed} valid", flush=True)
 

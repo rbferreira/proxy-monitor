@@ -704,3 +704,94 @@ class TestAddressesWeRefuseToDial:
         I am deliberately pointing this at my own network."""
         monkeypatch.setattr(pv, "ALLOW_INTERNAL_SOURCES", True)
         assert pv.extract_proxies("10.0.0.1:8080") == ["http://10.0.0.1:8080"]
+
+
+class TestProgressReporting:
+    """The counts existed all along — `done/total/passed` inside the loop — and
+    were printed to stdout and thrown away. A callback publishes them."""
+
+    def test_every_result_is_reported_once(self, monkeypatch):
+        monkeypatch.setattr(pv, "validate", lambda p, *a, **kw: (True, 0.2))
+        seen = []
+        proxies = [f"http://1.1.1.{i}:80" for i in range(1, 6)]
+
+        pv.validate_all_detailed(proxies, workers=2, with_exit_ip=False,
+                                 on_progress=lambda *args: seen.append(args))
+
+        assert len(seen) == len(proxies)
+        assert [d for d, _t, _p in seen] == [1, 2, 3, 4, 5]
+        assert seen[-1] == (5, 5, 5)
+
+    def test_it_counts_only_what_passed(self, monkeypatch):
+        monkeypatch.setattr(pv, "validate",
+                            lambda p, *a, **kw: (p.endswith(":80"), 0.2))
+        seen = []
+
+        pv.validate_all_detailed(["http://1.1.1.1:80", "http://2.2.2.2:3128"],
+                                 workers=1, with_exit_ip=False,
+                                 on_progress=lambda *args: seen.append(args))
+
+        assert seen[-1][1] == 2
+        assert seen[-1][2] == 1
+
+    def test_a_reporter_that_raises_does_not_cost_the_run(self, monkeypatch):
+        """Progress is telemetry. Losing ten minutes of validation because a
+        dashboard write failed would be a bad trade."""
+        monkeypatch.setattr(pv, "validate", lambda p, *a, **kw: (True, 0.2))
+
+        def boom(*args):
+            raise RuntimeError("nowhere to publish")
+
+        results = pv.validate_all_detailed(["http://1.1.1.1:80"], workers=1,
+                                           with_exit_ip=False, on_progress=boom)
+        assert results["http://1.1.1.1:80"].ok is True
+
+    def test_no_reporter_is_the_default(self, monkeypatch):
+        monkeypatch.setattr(pv, "validate", lambda p, *a, **kw: (True, 0.2))
+        assert pv.validate_all_detailed(["http://1.1.1.1:80"], workers=1,
+                                        with_exit_ip=False)
+
+
+class TestSourceProgressReporting:
+    @pytest.fixture(autouse=True)
+    def no_dns(self, monkeypatch):
+        """`source_is_allowed` resolves the hostname, and these URLs name hosts
+        that do not exist — five seconds of DNS timeout per test, to check
+        something else entirely."""
+        monkeypatch.setattr(pv, "source_is_allowed", lambda url: (True, ""))
+
+    def test_each_source_is_reported_with_a_running_count(self, monkeypatch):
+        monkeypatch.setattr(pv, "fetch_source",
+                            lambda url: "1.1.1.1:80" if "a" in url else "2.2.2.2:80")
+        seen = []
+
+        pv.fetch_proxies(["https://a/list", "https://b/list"],
+                         on_source=lambda *args: seen.append(args))
+
+        assert seen == [(1, 2, 1), (2, 2, 2)]
+
+    def test_a_dead_source_still_advances_the_count(self, monkeypatch):
+        """A reading that stalls on a failing source describes the reporter,
+        not the run."""
+        monkeypatch.setattr(pv, "fetch_source",
+                            lambda url: None if "dead" in url else "1.1.1.1:80")
+        seen = []
+
+        pv.fetch_proxies(["https://dead/list", "https://alive/list"],
+                         on_source=lambda *args: seen.append(args))
+
+        assert [d for d, _t, _f in seen] == [1, 2]
+        assert seen[-1] == (2, 2, 1)
+
+    def test_a_refused_source_still_advances_the_count(self, monkeypatch):
+        # Deliberately replaces the fixture's guard: this one has to refuse.
+        monkeypatch.setattr(pv, "source_is_allowed",
+                            lambda url: ("private" not in url, "refused"))
+        monkeypatch.setattr(pv, "fetch_source", lambda url: "1.1.1.1:80")
+        seen = []
+
+        pv.fetch_proxies(["https://private/list", "https://ok/list"],
+                         on_source=lambda *args: seen.append(args))
+
+        assert [d for d, _t, _f in seen] == [1, 2]
+

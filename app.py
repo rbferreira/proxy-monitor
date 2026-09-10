@@ -73,6 +73,11 @@ _state = {
     "source_count": 0,   # raw proxies downloaded from the sources
     "status": "idle",    # idle | running | ok | error
     "message": "",
+    # Live position inside the running cycle, or None between cycles:
+    # {"stage": "sources" | "validating", "done": n, "total": n, "found": n}.
+    # `found` is candidates gathered while reading sources, proxies that passed
+    # while validating — how many we have, either way.
+    "progress": None,
     "stats": {
         "total": 0,
         "healthy": 0,
@@ -409,15 +414,39 @@ def run_validation(wait: bool = False) -> None:
         return
     try:
         started = time.perf_counter()
-        _set_state(status="running", message="Validating proxies...")
+        _set_state(status="running", message="Validating proxies...",
+                   progress={"stage": "sources", "done": 0,
+                             "total": len(cfg("proxy_sources")), "found": 0})
         _log("Validation started")
+
+        # Published on `/api/stats` so the dashboard can draw where the cycle
+        # is. A cycle runs for minutes, and until now the only thing it said
+        # about itself was "running" — true, and no help at all.
+        def sources_progress(done: int, total: int, found: int) -> None:
+            _set_state(progress={"stage": "sources", "done": done,
+                                 "total": total, "found": found})
+
+        logged: set[int] = set()
+
+        def validation_progress(done: int, total: int, passed: int) -> None:
+            _set_state(progress={"stage": "validating", "done": done,
+                                 "total": total, "found": passed})
+            # Three lines per cycle, at the quarters, so `docker logs` answers
+            # "how far along is it?" for anyone without the dashboard open.
+            # The validator's own printing is every hundred proxies, which is
+            # the CLI's cadence and too much for a service log.
+            mark = (done * 4) // max(1, total)
+            if 0 < mark < 4 and mark not in logged:
+                logged.add(mark)
+                _log(f"Validation {mark * 25}%: {done}/{total} tested, {passed} valid")
 
         # Before the run, so a monthly database refresh lands between cycles
         # rather than in the middle of one.
         if cfg("geolookup"):
             geoip.ensure(DATA_DIR, _log)
 
-        proxies = proxy_validator.fetch_proxies(cfg("proxy_sources"))
+        proxies = proxy_validator.fetch_proxies(cfg("proxy_sources"),
+                                                on_source=sources_progress)
         if not proxies:
             raise RuntimeError("no source returned any proxy")
 
@@ -428,6 +457,7 @@ def run_validation(wait: bool = False) -> None:
             cfg("validator_workers"),
             samples=cfg("latency_samples"),
             with_exit_ip=cfg("detect_exit_ip"),
+            on_progress=validation_progress,
         )
         latencies = {p: r.latency for p, r in detailed.items()
                      if r.ok and r.latency is not None}
@@ -459,6 +489,7 @@ def run_validation(wait: bool = False) -> None:
             source_count=len(proxies),
             status="ok",
             message=f"{len(valid)} of {len(proxies)} proxies valid",
+            progress=None,
         )
         write_output_file(valid, {"last_run": _state["last_run"],
                                   "duration": duration,
@@ -467,7 +498,7 @@ def run_validation(wait: bool = False) -> None:
                                   "exit_ips": exit_ips})
         _log(f"Validation finished in {duration}s: {len(valid)}/{len(proxies)} proxies valid")
     except Exception as exc:
-        _set_state(status="error", message=str(exc))
+        _set_state(status="error", message=str(exc), progress=None)
         _log(f"Validation error: {exc}")
     finally:
         _validation_lock.release()
@@ -803,6 +834,31 @@ DASHBOARD_HTML = """
         .tele:last-child { border-right: 0; }
         .tele .v { font-size: 13px; color: var(--ink); margin-top: 3px; }
         .tele .v.accent { color: var(--amber); }
+
+        /* Progresso do ciclo em andamento, dentro da célula de estado. */
+        .prog { margin-top: 7px; }
+        .prog-track { height: 3px; background: var(--rule); overflow: hidden; }
+        .prog-track i {
+            display: block;
+            height: 100%;
+            width: 0;
+            background: var(--amber);
+            box-shadow: 0 0 6px var(--amber);
+            transition: width 0.45s ease;
+        }
+        /* Enquanto as fontes são lidas não existe percentual honesto: o total
+           é de fontes, não de proxies. A faixa anda para dizer "trabalhando",
+           e a contagem embaixo diz exatamente onde está. */
+        .prog-track.indet i {
+            width: 34%;
+            transition: none;
+            animation: prog-slide 1.15s linear infinite;
+        }
+        @keyframes prog-slide {
+            from { transform: translateX(-100%); }
+            to { transform: translateX(295%); }
+        }
+        .prog-num { font-size: 9px; color: var(--ink-faint); margin-top: 4px; letter-spacing: 0.04em; }
 
         /* ---------- Banner de erro ---------- */
         .banner {
@@ -1250,6 +1306,7 @@ DASHBOARD_HTML = """
         @media (prefers-reduced-motion: reduce) {
             .rise { animation: none; opacity: 1; transform: none; }
             .led { animation: none !important; }
+            .prog-track.indet i { animation: none !important; width: 100%; opacity: 0.5; }
         }
 
         @media (max-width: 1180px) { .grid { grid-template-columns: 1fr 1fr; } .grid .panel:first-child { grid-column: 1 / -1; } }
@@ -1277,6 +1334,10 @@ DASHBOARD_HTML = """
             <div class="tele">
                 <div class="label" data-t="state"></div>
                 <div class="v" id="t-status">&mdash;</div>
+                <div class="prog" id="t-prog" hidden>
+                    <div class="prog-track" id="t-prog-track"><i id="t-prog-bar"></i></div>
+                    <div class="prog-num" id="t-prog-num"></div>
+                </div>
             </div>
             <div class="tele">
                 <div class="label" data-t="last_scan"></div>
@@ -1450,6 +1511,11 @@ DASHBOARD_HTML = """
     let MIN_CHECKS = 5;
 
     const REFRESH_MS = 30000;
+    // A bar that moves once every thirty seconds is not a bar. While a cycle
+    // runs the dashboard polls often enough for the thing to look alive, and
+    // goes back to the slow cadence the moment it ends.
+    const REFRESH_RUNNING_MS = 5000;
+    let refreshMs = REFRESH_MS;
     const ACTION_TIMEOUT_MS = 15000;
     const KNOWN_PROTOCOLS = ['http', 'https', 'socks4', 'socks5'];
     const $ = (id) => document.getElementById(id);
@@ -2060,6 +2126,31 @@ DASHBOARD_HTML = """
         return palette[proto] || fallback[i % fallback.length];
     }
 
+    /** Where the running cycle is. Hidden whenever nothing is running. */
+    function renderProgress(data) {
+        const pg = data.progress;
+        const box = $('t-prog');
+        if (!pg || data.status !== 'running') {
+            box.hidden = true;
+            return;
+        }
+        const total = pg.total || 0;
+        const done = pg.done || 0;
+        const sources = pg.stage === 'sources';
+        const vars = {
+            done: done.toLocaleString(LOCALE),
+            total: total.toLocaleString(LOCALE),
+            found: (pg.found || 0).toLocaleString(LOCALE),
+        };
+        box.hidden = false;
+        $('t-prog-track').classList.toggle('indet', sources);
+        // Left to the stylesheet in the indeterminate case, where the width is
+        // the sliding stripe rather than a position.
+        $('t-prog-bar').style.width = sources
+            ? '' : (total ? Math.min(100, (done / total) * 100).toFixed(1) : 0) + '%';
+        $('t-prog-num').textContent = t(sources ? 'progress_sources' : 'progress_validating', vars);
+    }
+
     function render(data) {
         const st = data.stats || {};
         MIN_CHECKS = data.stability_min_checks || MIN_CHECKS;
@@ -2074,6 +2165,8 @@ DASHBOARD_HTML = """
         $('t-next').textContent = fmtClock(data.next_run) || '\\u2014';
 
         showBanner(data.status === 'error' && data.message ? data.message : '');
+        renderProgress(data);
+        refreshMs = data.status === 'running' ? REFRESH_RUNNING_MS : REFRESH_MS;
 
         const total = st.total || 0;
         const source = data.source_count || 0;
@@ -2098,7 +2191,7 @@ DASHBOARD_HTML = """
         renderTable();
 
         $('foot-sync').textContent = t('footer_sync', {
-            time: new Date().toLocaleTimeString(LOCALE), seconds: REFRESH_MS / 1000,
+            time: new Date().toLocaleTimeString(LOCALE), seconds: refreshMs / 1000,
         });
     }
 
@@ -2301,8 +2394,16 @@ DASHBOARD_HTML = """
 
     applyStaticStrings();
     readSession();
-    poll();
-    setInterval(poll, REFRESH_MS);
+
+    // Self-rescheduling rather than setInterval: the cadence depends on what
+    // the last answer said, and a running cycle deserves a faster one.
+    let pollTimer = null;
+    async function tick() {
+        await poll();
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(tick, refreshMs);
+    }
+    tick();
 </script>
 </body>
 </html>
@@ -2334,6 +2435,7 @@ def api_stats():
         return jsonify({
             "status": _state["status"],
             "message": _state["message"],
+            "progress": _state["progress"],
             "last_run": _state["last_run"],
             "next_run": _state["next_run"],
             "duration": _state["duration"],

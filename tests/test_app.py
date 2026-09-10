@@ -3,11 +3,9 @@ import os
 
 import pytest
 
-os.environ.setdefault("API_KEY", "test-key")
-os.environ.setdefault("DISABLE_SCHEDULER", "1")  # no scheduler during tests
-os.environ.setdefault("GEOLOOKUP", "false")      # no GeoIP database in tests
-
-import app as app_module  # noqa: E402
+# The environment and every state path are set in conftest.py, which pytest
+# imports before this module — importing the app already writes some of them.
+import app as app_module
 
 KEY = {"X-API-Key": os.environ["API_KEY"]}
 
@@ -260,7 +258,7 @@ class TestHealthDuringValidation:
 
         release = threading.Event()
 
-        def slow_fetch(sources=None):
+        def slow_fetch(sources=None, on_source=None):
             release.wait(timeout=5)
             return ["http://1.1.1.1:80"]
 
@@ -639,7 +637,7 @@ class TestConfigurableSources:
     def test_validation_uses_the_configured_sources(self, monkeypatch, isolated_settings):
         seen = {}
 
-        def fake_fetch(sources=None):
+        def fake_fetch(sources=None, on_source=None):
             seen["sources"] = sources
             return []
 
@@ -664,7 +662,7 @@ class TestConfigurableTargets:
             raise Stop
 
         monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
-                            lambda sources=None: ["http://1.1.1.1:80"])
+                            lambda sources=None, on_source=None: ["http://1.1.1.1:80"])
         monkeypatch.setattr(app_module.proxy_validator, "validate_all_detailed",
                             fake_validate)
         isolated_settings.apply({"test_urls": ["https://mine.example/204"]})
@@ -822,6 +820,126 @@ class TestSourceGuardOverApi:
                             lambda u: (called.append(u), (True, ""))[1])
         client.post("/api/settings", json={"dashboard_rows": 40}, headers=KEY)
         assert called == []
+
+
+class TestCycleProgress:
+    """A cycle runs for minutes. Until it published its position, the only
+    thing it said about itself was "running"."""
+
+    def test_stats_carries_no_progress_between_cycles(self, client):
+        assert client.get("/api/stats").get_json()["progress"] is None
+
+    def test_the_stages_are_published_in_order(self, monkeypatch, isolated_settings):
+        """Reading sources first, then validating — and the numbers belong to
+        whichever stage is being reported."""
+        seen = []
+
+        def fake_fetch(sources=None, on_source=None):
+            on_source(1, 2, 300)
+            on_source(2, 2, 900)
+            return ["http://1.1.1.1:80", "http://2.2.2.2:80"]
+
+        def fake_validate(proxies, *a, on_progress=None, **kw):
+            on_progress(1, 2, 1)
+            seen.append(dict(app_module._state["progress"]))
+            on_progress(2, 2, 1)
+            raise RuntimeError("stop before publishing")
+
+        def watch(**kw):
+            if "progress" in kw and kw["progress"] is not None:
+                seen.append(dict(kw["progress"]))
+
+        real_set_state = app_module._set_state
+
+        def spy(**kw):
+            watch(**kw)
+            real_set_state(**kw)
+
+        monkeypatch.setattr(app_module, "_set_state", spy)
+        monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies", fake_fetch)
+        monkeypatch.setattr(app_module.proxy_validator, "validate_all_detailed", fake_validate)
+        app_module.run_validation()
+
+        stages = [p["stage"] for p in seen]
+        assert stages[0] == "sources"
+        assert "validating" in stages
+        assert stages.index("sources") < stages.index("validating")
+        sources = [p for p in seen if p["stage"] == "sources"]
+        assert sources[-1] == {"stage": "sources", "done": 2, "total": 2, "found": 900}
+        validating = [p for p in seen if p["stage"] == "validating"]
+        assert validating[-1] == {"stage": "validating", "done": 2, "total": 2, "found": 1}
+
+    def test_a_finished_cycle_leaves_no_bar_behind(self, monkeypatch, isolated_settings):
+        # The only test that runs a cycle all the way through publishing, so the
+        # only one that writes a cache, a meta file and a stability snapshot.
+        # They land in the test state directory — see conftest.
+        monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
+                            lambda sources=None, on_source=None: ["http://1.1.1.1:80"])
+        monkeypatch.setattr(
+            app_module.proxy_validator, "validate_all_detailed",
+            lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
+                "http://1.1.1.1:80", True, 0.2)})
+
+        app_module.run_validation()
+        with app_module._lock:
+            assert app_module._state["status"] == "ok"
+            assert app_module._state["progress"] is None
+
+    def test_a_failed_cycle_leaves_no_bar_behind(self, monkeypatch, isolated_settings):
+        """An error state showing a half-filled bar would claim a cycle is
+        still going."""
+        monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
+                            lambda sources=None, on_source=None: [])
+        app_module.run_validation()
+        with app_module._lock:
+            assert app_module._state["status"] == "error"
+            assert app_module._state["progress"] is None
+
+    def test_the_recheck_loop_publishes_none(self, monkeypatch):
+        """The bar describes discovery. A re-check every two minutes does not
+        change the published list, and a bar appearing next to OPERATIONAL
+        would say a scan is happening when none is."""
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.9})
+        monkeypatch.setattr(
+            app_module.proxy_validator, "validate_all_detailed",
+            lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
+                "http://1.1.1.1:80", True, 0.3)})
+
+        assert app_module.recheck_once() is True
+        with app_module._lock:
+            assert app_module._state["progress"] is None
+
+
+class TestStatePathsAreDisposable:
+    """Same shape as the Dockerfile and README-badge tests, and for the same
+    reason: `app.py` resolves these paths at import and writes some of them
+    immediately, so only conftest can redirect them — and a path added later
+    has nothing reminding whoever adds it."""
+
+    def test_every_persisted_path_is_under_the_test_directory(self, state_dir):
+        """Found by sweeping the module rather than listed here, so a path
+        constant added later is covered without anyone remembering to.
+        """
+        root = os.path.realpath(state_dir)
+        paths = {name: getattr(app_module, name) for name in dir(app_module)
+                 if name.endswith(("_FILE", "_DIR"))
+                 and isinstance(getattr(app_module, name), str)}
+        paths.update({
+            "auth_store.path": app_module.auth_store.path,
+            "settings_store.path": app_module.settings_store.path,
+            "stability_store.path": app_module.stability_store.path,
+        })
+        # OUTPUT_FILE, CACHE_META_FILE, DATA_DIR, API_KEY_FILE, AUTH_FILE,
+        # RUNTIME_FILE and the three stores. Fewer means the sweep stopped
+        # finding them and this test stopped meaning anything.
+        assert len(paths) >= 9
+        for name, path in paths.items():
+            assert os.path.realpath(path).startswith(root), f"{name} escapes: {path}"
+
+    def test_the_boot_really_wrote_in_there(self, state_dir):
+        """Not a restatement of the paths above: importing the app creates the
+        auth file with the initial password, and this is where it landed."""
+        assert "auth.json" in os.listdir(state_dir)
 
 
 class TestImageContents:
@@ -1047,7 +1165,7 @@ class TestScheduledCycleWaits:
 
         monkeypatch.setattr(app_module, "_LOCK_WAIT_SECONDS", 5)
         monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
-                            lambda sources=None: ["http://1.1.1.1:80"])
+                            lambda sources=None, on_source=None: ["http://1.1.1.1:80"])
         monkeypatch.setattr(
             app_module.proxy_validator, "validate_all_detailed",
             lambda *a, **kw: {"http://1.1.1.1:80": app_module.proxy_validator.Result(
@@ -1074,7 +1192,7 @@ class TestScheduledCycleWaits:
         """/api/refresh must answer at once rather than block the request."""
         calls = []
         monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
-                            lambda sources=None: calls.append(1) or [])
+                            lambda sources=None, on_source=None: calls.append(1) or [])
 
         app_module._validation_lock.acquire()
         try:

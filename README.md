@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-373%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-387%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
@@ -64,12 +64,25 @@ so one hiccup does not become a property of the proxy.
 
 ## Dashboard
 
-`http://localhost:8069` — refreshes every 30s, reading `/api/stats`.
+`http://localhost:8069` — refreshes every 30s, reading `/api/stats`, and every
+5s while a cycle is running.
 
 Shows accepted vs. tested, pass rate, min/avg/max latency, protocol split, a
 latency histogram computed server-side over **every** valid proxy (not just the
 ones on screen, which would skew it toward the fast end), top 10 countries, and
 a filterable table of the fastest nodes.
+
+**A running cycle says where it is.** A cycle takes minutes, and SCANNING on its
+own is true and no help, so the state cell carries a progress bar: a sliding one
+while the sources are being read, since the only total available there is a
+count of sources, and a filling one during validation with `1234 of 5800 tested
+· 87 valid` under it. The same numbers ride on `/api/stats` as `progress`, so
+`curl -s host/api/stats | jq .progress` answers the question without a browser,
+and the log prints the quarters for whoever only has `docker logs`.
+
+The bar is deliberately about the discovery cycle only. The stability re-check
+runs every two minutes and does not change the published list; a bar appearing
+beside OPERATIONAL would announce a scan that is not happening.
 
 Available in **English and Portuguese**, switchable from the settings panel. The
 browser's `Accept-Language` is the initial guess; an explicit choice is
@@ -236,7 +249,10 @@ The scheduler starts in a daemon thread at import, so it behaves the same under
 1. `fetch_proxies()` downloads and **normalizes** every source — lines without a
    valid host and port are dropped before they become validation work. Sources
    do sometimes answer with an HTML error page.
-2. `validate_all()` tests in parallel over HTTPS, timing the whole request.
+2. `validate_all()` tests in parallel over HTTPS, timing the whole request. Both
+   steps take a progress callback, and both report even when a source is dead or
+   a proxy fails, so a reading that stalls means the run stalled and not the
+   reporting.
 3. `build_snapshot()` builds metadata and aggregates **outside the state lock**,
    because it does network I/O with sleeps between batches — holding the lock
    there would stall every HTTP request.
