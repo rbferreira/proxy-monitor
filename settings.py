@@ -39,13 +39,19 @@ class Setting:
     effect: str = "immediate"
     # "list" only: cap on how many entries are accepted
     max_items: int = 50
+    # "list" only: URL schemes accepted per entry. The UI validates its own
+    # fields from this, so both sides refuse exactly the same thing.
+    schemes: tuple[str, ...] = ("http", "https")
+    # "list" only: slug of the endpoint that tries one entry out before saving
+    # (`/api/settings/test-<probe>`). Empty renders no test button.
+    probe: str = ""
 
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="proxy_sources", env="PROXY_SOURCES", type="list",
         default=list(proxy_validator.PROXY_SOURCES),
-        group="sources", effect="next_cycle", max_items=50,
+        group="sources", effect="next_cycle", max_items=50, probe="source",
     ),
     Setting(
         key="interval_seconds", env="INTERVAL_SECONDS", type="int", default=1200,
@@ -66,6 +72,18 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="detect_exit_ip", env="DETECT_EXIT_IP", type="bool", default=True,
         group="validation", effect="next_cycle",
+    ),
+    # **https only, and not negotiable from the UI.** The whole difference
+    # between this service and a list scraper is that a proxy has to open a
+    # CONNECT tunnel to pass; an `http://` target here would quietly bring back
+    # the 104 false positives out of 174 that the measurement in
+    # `proxy_validator` records. The CLI keeps `--test-http` for reproducing
+    # that comparison on purpose.
+    Setting(
+        key="test_urls", env="TEST_URLS", type="list",
+        default=list(proxy_validator.DEFAULT_TEST_URLS),
+        group="validation", effect="next_cycle", max_items=5,
+        schemes=("https",), probe="target",
     ),
     Setting(
         key="geolookup", env="GEOLOOKUP", type="bool", default=True,
@@ -146,9 +164,11 @@ def coerce(s: Setting, value, locale: str = i18n.DEFAULT_LOCALE):
         for entry in entries:
             parsed = urlparse(entry)
             # Anything but http/https would be handed straight to urlopen, and a
-            # file:// or similar scheme there reads the server's own disk.
-            if parsed.scheme not in ("http", "https") or not parsed.netloc:
-                raise ValueError(f"{label}: not an http(s) URL: {entry[:60]}")
+            # file:// or similar scheme there reads the server's own disk. A
+            # setting may narrow the list further — see `test_urls`.
+            if parsed.scheme not in s.schemes or not parsed.netloc:
+                wanted = " or ".join(f"{sc}://" for sc in s.schemes)
+                raise ValueError(f"{label}: needs a {wanted} URL: {entry[:60]}")
         return entries
 
     if s.type == "bool":
@@ -284,6 +304,8 @@ class Store:
                 "minimum": s.minimum,
                 "maximum": s.maximum,
                 "effect": s.effect,
+                "schemes": list(s.schemes),
+                "probe": s.probe,
                 "value": self.get(s.key),
                 "default": _from_env(s),
                 "overridden": self.is_overridden(s.key),

@@ -68,6 +68,16 @@ CATALOG: dict[str, dict] = {
                                "transparent proxy exits under your own address, which a pass/fail "
                                "check cannot see. Costs one extra request per working proxy.",
             },
+            "test_urls": {
+                "label": "Validation targets",
+                "description": "The URLs every proxy is asked to fetch. The first one answering "
+                               "under 400 decides the verdict, and its median latency is what the "
+                               "table shows; the next is only tried when the previous fails "
+                               "outright. HTTPS only, deliberately: a plain-HTTP target never "
+                               "opens a CONNECT tunnel, and of 174 proxies passing that way only "
+                               "70 could carry real traffic. Prefer a small endpoint that is "
+                               "always up — a 204 has no body to download.",
+            },
             "geolookup": {
                 "label": "Look up IP country",
                 "description": "Resolves each IP's country from a local database to feed the origin "
@@ -225,6 +235,9 @@ CATALOG: dict[str, dict] = {
             "source_url_placeholder": "https://example.com/proxies.txt",
             "add_source": "add",
             "remove_source": "remove",
+            "target_url_placeholder": "https://www.gstatic.com/generate_204",
+            "target_ok": "answered {status} in {elapsed}s",
+            "target_bad": "answered {status} — every proxy would fail",
             "one_per_line": "one URL per line",
         },
     },
@@ -275,6 +288,16 @@ CATALOG: dict[str, dict] = {
                 "description": "Pergunta a cada proxy funcional por qual endereço o tráfego sai. "
                                "Proxy transparente sai com o seu próprio endereço, e uma checagem "
                                "de passa/não-passa não enxerga isso. Custa uma requisição extra.",
+            },
+            "test_urls": {
+                "label": "Destinos de teste",
+                "description": "As URLs que cada proxy é obrigado a buscar. A primeira que "
+                               "responder abaixo de 400 decide o veredito, e a mediana da latência "
+                               "dela é o que aparece na tabela; a seguinte só é tentada quando a "
+                               "anterior falha de vez. Só HTTPS, de propósito: destino em HTTP puro "
+                               "não abre túnel CONNECT, e dos 174 proxies aprovados assim só 70 "
+                               "carregavam tráfego real. Prefira um endpoint pequeno e sempre de "
+                               "pé — um 204 não tem corpo para baixar.",
             },
             "geolookup": {
                 "label": "Consultar país dos IPs",
@@ -432,6 +455,9 @@ CATALOG: dict[str, dict] = {
             "source_url_placeholder": "https://exemplo.com/proxies.txt",
             "add_source": "adicionar",
             "remove_source": "remover",
+            "target_url_placeholder": "https://www.gstatic.com/generate_204",
+            "target_ok": "respondeu {status} em {elapsed}s",
+            "target_bad": "respondeu {status} — todo proxy falharia",
             "one_per_line": "uma URL por linha",
         },
     },

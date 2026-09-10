@@ -13,6 +13,7 @@ import os
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -422,7 +423,7 @@ def run_validation(wait: bool = False) -> None:
 
         detailed = proxy_validator.validate_all_detailed(
             proxies,
-            proxy_validator.DEFAULT_TEST_URLS,
+            cfg("test_urls"),
             cfg("max_latency_seconds"),
             cfg("validator_workers"),
             samples=cfg("latency_samples"),
@@ -492,7 +493,9 @@ def recheck_once() -> bool:
 
         detailed = proxy_validator.validate_all_detailed(
             targets,
-            proxy_validator.DEFAULT_TEST_URLS,
+            # Same targets as the full cycle: a stability verdict built against
+            # a different destination would not be about the same measurement.
+            cfg("test_urls"),
             cfg("max_latency_seconds"),
             cfg("validator_workers"),
             samples=cfg("latency_samples"),
@@ -1758,6 +1761,12 @@ DASHBOARD_HTML = """
                     ctrl.className = 'cfg-list';
                     const values = Array.isArray(a.value) ? a.value.slice() : [];
 
+                    // Mirrors the schemes the server accepts for this setting, so
+                    // a URL the field shows as valid is not rejected after the
+                    // click. Validation targets take https and nothing else.
+                    const schemes = (a.schemes && a.schemes.length) ? a.schemes : ['http', 'https'];
+                    const shape = new RegExp('^(' + schemes.join('|') + '):[/][/].+', 'i');
+
                     // Same contract as the numeric inputs: an invalid entry blocks
                     // saving instead of letting the server reject it after the click.
                     const commit = () => {
@@ -1779,45 +1788,57 @@ DASHBOARD_HTML = """
                         const inp = document.createElement('input');
                         inp.type = 'url';
                         inp.value = url || '';
-                        inp.placeholder = t('source_url_placeholder');
+                        inp.placeholder = t((a.probe || 'source') + '_url_placeholder');
                         inp.addEventListener('input', () => {
                             const v = inp.value.trim();
-                            inp.classList.toggle('invalido', Boolean(v) && !/^https?:[/][/].+/i.test(v));
+                            inp.classList.toggle('invalido', Boolean(v) && !shape.test(v));
                             commit();
                         });
-
-                        const test = document.createElement('button');
-                        test.className = 'chip';
-                        test.type = 'button';
-                        test.textContent = t('test_source');
 
                         const msg = document.createElement('div');
                         msg.className = 'cfg-list-msg';
 
-                        test.addEventListener('click', async () => {
-                            const v = inp.value.trim();
-                            if (!v) return;
-                            test.disabled = true;
-                            msg.className = 'cfg-list-msg';
-                            msg.textContent = t('testing');
-                            const r = await action('/api/settings/test-source', {
-                                method: 'POST', body: JSON.stringify({ url: v }),
+                        // Only for a setting declaring a probe endpoint. Saving a
+                        // URL blind means waiting a whole cycle to learn it yields
+                        // nothing — or, for a target, fails every proxy at once.
+                        const test = a.probe ? document.createElement('button') : null;
+                        if (test) {
+                            test.className = 'chip';
+                            test.type = 'button';
+                            test.textContent = t('test_source');
+
+                            test.addEventListener('click', async () => {
+                                const v = inp.value.trim();
+                                if (!v) return;
+                                test.disabled = true;
+                                msg.className = 'cfg-list-msg';
+                                msg.textContent = t('testing');
+                                const r = await action('/api/settings/test-' + a.probe, {
+                                    method: 'POST', body: JSON.stringify({ url: v }),
+                                });
+                                test.disabled = false;
+                                if (!r) { msg.className = 'cfg-list-msg erro'; msg.textContent = t('load_failed'); return; }
+                                if (r.error) {
+                                    msg.className = 'cfg-list-msg erro';
+                                    msg.textContent = t('source_failed', { error: r.error });
+                                } else if (a.probe === 'target') {
+                                    // A status is an answer either way: 204 is what
+                                    // the validator wants, 403 is what it would read
+                                    // for every single proxy.
+                                    msg.className = 'cfg-list-msg ' + (r.ok ? 'ok' : 'erro');
+                                    msg.textContent = t(r.ok ? 'target_ok' : 'target_bad',
+                                        { status: r.status, elapsed: r.elapsed });
+                                } else if (r.ok) {
+                                    const types = Object.entries(r.by_type)
+                                        .map(([k, n]) => k + ' ' + n).join(', ');
+                                    msg.className = 'cfg-list-msg ok';
+                                    msg.textContent = t('source_ok', { found: r.found, types: types });
+                                } else {
+                                    msg.className = 'cfg-list-msg erro';
+                                    msg.textContent = t('source_empty', { lines: r.lines });
+                                }
                             });
-                            test.disabled = false;
-                            if (!r) { msg.className = 'cfg-list-msg erro'; msg.textContent = t('load_failed'); return; }
-                            if (r.ok) {
-                                const types = Object.entries(r.by_type)
-                                    .map(([k, n]) => k + ' ' + n).join(', ');
-                                msg.className = 'cfg-list-msg ok';
-                                msg.textContent = t('source_ok', { found: r.found, types: types });
-                            } else if (r.error) {
-                                msg.className = 'cfg-list-msg erro';
-                                msg.textContent = t('source_failed', { error: r.error });
-                            } else {
-                                msg.className = 'cfg-list-msg erro';
-                                msg.textContent = t('source_empty', { lines: r.lines });
-                            }
-                        });
+                        }
 
                         const del = document.createElement('button');
                         del.className = 'chip';
@@ -1829,7 +1850,7 @@ DASHBOARD_HTML = """
                         });
 
                         line.appendChild(inp);
-                        line.appendChild(test);
+                        if (test) line.appendChild(test);
                         line.appendChild(del);
 
                         const wrap = document.createElement('div');
@@ -2638,10 +2659,15 @@ def api_settings_post():
 
     # Checked here rather than inside the settings module: resolving a hostname
     # is network I/O, and `Store.load()` shares that validation path — the boot
-    # would start doing DNS lookups for every persisted source.
+    # would start doing DNS lookups for every persisted URL.
+    #
+    # Validation targets go through the same check as sources: they are fetched
+    # through a proxy, but `requests` bypasses the proxy for anything covered by
+    # NO_PROXY, and the test-target probe below fetches them directly.
     blocked = [
         reason
-        for url in settings_mod.parse_list(changes.get("proxy_sources", []))
+        for key in ("proxy_sources", "test_urls")
+        for url in settings_mod.parse_list(changes.get(key, []))
         for allowed, reason in [proxy_validator.source_is_allowed(url)]
         if not allowed
     ]
@@ -2705,6 +2731,48 @@ def api_test_source():
         "lines": len(lines),
         "by_type": by_type,
         "sample": found[:3],
+        "elapsed": round(time.perf_counter() - started, 2),
+    }), 200
+
+
+@app.post("/api/settings/test-target")
+def api_test_target():
+    """Fetch one validation target directly, with no proxy, and report what it
+    answers.
+
+    A typo here is the most expensive mistake available in the panel: every
+    proxy fails the next cycle and the dashboard shows an empty list with
+    nothing saying why. One direct request answers in a second instead.
+    """
+    url = (request.get_json(silent=True) or {}).get("url", "").strip()
+    parsed = urlparse(url)
+    # https only, matching what the setting accepts — see `settings.test_urls`.
+    if parsed.scheme != "https" or not parsed.netloc:
+        return jsonify({"ok": False, "error": "not an https:// URL"}), 400
+
+    # Same reason as the source probe: without this the endpoint answers
+    # responded / refused / timed out for any address, which maps the network
+    # the server can reach and the caller cannot.
+    allowed, reason = proxy_validator.source_is_allowed(url)
+    if not allowed:
+        return jsonify({"ok": False, "error": reason}), 400
+
+    started = time.perf_counter()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status, body = resp.status, len(resp.read(65_536))
+    except urllib.error.HTTPError as exc:
+        # A 4xx/5xx is not a failed probe: it is the answer, and it is the same
+        # answer the validator would read for every proxy.
+        status, body = exc.code, 0
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:200]}), 200
+
+    return jsonify({
+        "ok": status < 400,          # the validator's own threshold
+        "status": status,
+        "bytes": body,
         "elapsed": round(time.perf_counter() - started, 2),
     }), 200
 

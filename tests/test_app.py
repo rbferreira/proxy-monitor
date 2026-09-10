@@ -649,6 +649,145 @@ class TestConfigurableSources:
         assert seen["sources"] == ["https://mine/list"]
 
 
+class TestConfigurableTargets:
+    """The destination proxies are measured against is a setting, and both loops
+    have to read the same one."""
+
+    def test_the_full_cycle_uses_the_configured_targets(self, monkeypatch, isolated_settings):
+        seen = {}
+
+        class Stop(Exception):
+            """Ends the cycle before it publishes or writes anything."""
+
+        def fake_validate(proxies, test_urls, *a, **kw):
+            seen["urls"] = test_urls
+            raise Stop
+
+        monkeypatch.setattr(app_module.proxy_validator, "fetch_proxies",
+                            lambda sources=None: ["http://1.1.1.1:80"])
+        monkeypatch.setattr(app_module.proxy_validator, "validate_all_detailed",
+                            fake_validate)
+        isolated_settings.apply({"test_urls": ["https://mine.example/204"]})
+        app_module.run_validation()
+        assert seen["urls"] == ["https://mine.example/204"]
+
+    def test_the_recheck_loop_uses_the_same_ones(self, monkeypatch, isolated_settings):
+        """A verdict measured against another destination would not be about the
+        same thing as the cycle that published the list."""
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.9})
+        seen = {}
+
+        def fake_validate(proxies, test_urls, *a, **kw):
+            seen["urls"] = test_urls
+            return {}
+
+        monkeypatch.setattr(app_module.proxy_validator, "validate_all_detailed",
+                            fake_validate)
+        isolated_settings.apply({"test_urls": ["https://mine.example/204"]})
+        app_module.recheck_once()
+        assert seen["urls"] == ["https://mine.example/204"]
+
+    def test_unset_falls_back_to_the_validator_default(self, monkeypatch, isolated_settings):
+        seed(["http://1.1.1.1:80"], {"http://1.1.1.1:80": 0.9})
+        seen = {}
+
+        def fake_validate(proxies, test_urls, *a, **kw):
+            seen["urls"] = test_urls
+            return {}
+
+        monkeypatch.delenv("TEST_URLS", raising=False)
+        monkeypatch.setattr(app_module.proxy_validator, "validate_all_detailed",
+                            fake_validate)
+        app_module.recheck_once()
+        assert seen["urls"] == list(app_module.proxy_validator.DEFAULT_TEST_URLS)
+
+
+class _Answer:
+    """What urlopen gives back, reduced to what the probe reads."""
+
+    def __init__(self, status, body=b""):
+        self.status, self._body = status, body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, size=None):
+        return self._body
+
+
+class TestTargetProbe:
+    """A wrong target is the most expensive typo available in the panel: every
+    proxy fails the next cycle and nothing on screen says why."""
+
+    URL = "https://www.gstatic.com/generate_204"
+
+    def test_needs_a_credential(self, client):
+        assert client.post("/api/settings/test-target",
+                           json={"url": self.URL}).status_code == 401
+
+    def test_refuses_anything_but_https(self, client):
+        """Same rule as the setting: a plain-HTTP target would not exercise
+        CONNECT, so the probe would answer about a check we do not run."""
+        for bad in ["http://example.com/204", "file:///etc/passwd", "not-a-url", ""]:
+            r = client.post("/api/settings/test-target", json={"url": bad}, headers=KEY)
+            assert r.status_code == 400, bad
+            assert r.get_json()["ok"] is False
+
+    def test_reports_the_status_it_answered(self, client, monkeypatch):
+        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+                            lambda *a, **kw: _Answer(204))
+        d = client.post("/api/settings/test-target",
+                        json={"url": self.URL}, headers=KEY).get_json()
+        assert d["ok"] is True
+        assert d["status"] == 204
+        assert d["elapsed"] >= 0
+
+    def test_a_refusal_is_a_result_not_a_broken_probe(self, client, monkeypatch):
+        """403 is exactly what the validator would read for every proxy, so it
+        belongs on screen as an answer."""
+        def blocked(*a, **kw):
+            raise app_module.urllib.error.HTTPError(
+                self.URL, 403, "Forbidden", {}, None)
+
+        monkeypatch.setattr(app_module.urllib.request, "urlopen", blocked)
+        r = client.post("/api/settings/test-target", json={"url": self.URL}, headers=KEY)
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["ok"] is False
+        assert d["status"] == 403
+
+    def test_a_fetch_failure_does_not_raise(self, client, monkeypatch):
+        def boom(*a, **kw):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(app_module.urllib.request, "urlopen", boom)
+        d = client.post("/api/settings/test-target",
+                        json={"url": self.URL}, headers=KEY).get_json()
+        assert d["ok"] is False
+        assert "refused" in d["error"]
+
+    def test_refuses_an_internal_target(self, client, monkeypatch):
+        """Fetched directly, with no proxy in the way — without this the probe
+        maps the network the server reaches and the caller does not."""
+        monkeypatch.setattr(app_module.proxy_validator, "source_is_allowed",
+                            lambda u: (False, "resolves to a private address"))
+        r = client.post("/api/settings/test-target",
+                        json={"url": "https://192.168.1.1/204"}, headers=KEY)
+        assert r.status_code == 400
+        assert "private" in r.get_json()["error"]
+
+    def test_saving_an_internal_target_is_refused(self, client, isolated_settings, monkeypatch):
+        monkeypatch.setattr(app_module.proxy_validator, "source_is_allowed",
+                            lambda u: ("192.168" not in u, "resolves to a private address"))
+        r = client.post("/api/settings",
+                        json={"test_urls": ["https://192.168.1.1/204"]}, headers=KEY)
+        assert r.status_code == 400
+        assert isolated_settings.is_overridden("test_urls") is False
+
+
 class TestSourceGuardOverApi:
     def test_test_source_refuses_an_internal_target(self, client, monkeypatch):
         """Otherwise the endpoint is a port scanner: responded / refused /

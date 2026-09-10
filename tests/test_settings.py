@@ -286,3 +286,71 @@ class TestListSetting:
         assert item["type"] == "list"
         assert isinstance(item["value"], list)
         assert item["group"] == "Proxy sources"
+
+
+class TestValidationTargets:
+    """The host every proxy is measured against is a setting now. It is the one
+    list in the schema that refuses `http://`."""
+
+    def test_default_comes_from_the_validator(self):
+        import proxy_validator as pv
+        assert st.BY_KEY["test_urls"].default == list(pv.DEFAULT_TEST_URLS)
+
+    def test_accepts_https_targets(self):
+        s = st.BY_KEY["test_urls"]
+        assert st.coerce(s, ["https://a/204", "https://b/204"]) == [
+            "https://a/204", "https://b/204"]
+
+    def test_rejects_plain_http(self):
+        """The whole difference from a list scraper is that a proxy must open a
+        CONNECT tunnel to pass. An http:// target brings the false positives
+        back, so the UI cannot reach for one."""
+        with pytest.raises(ValueError, match="https://"):
+            st.coerce(st.BY_KEY["test_urls"], ["http://example.com"])
+
+    def test_rejects_other_schemes(self):
+        for bad in ["file:///etc/passwd", "ftp://host/x", "https://"]:
+            with pytest.raises(ValueError, match="https://"):
+                st.coerce(st.BY_KEY["test_urls"], [bad])
+
+    def test_sources_still_accept_plain_http(self):
+        """Narrowing the targets must not narrow every list in the schema."""
+        assert st.coerce(st.BY_KEY["proxy_sources"], ["http://a/list"]) == ["http://a/list"]
+
+    def test_rejects_an_empty_list(self):
+        """With no target there is nothing to measure against, and every proxy
+        would fail the next cycle."""
+        with pytest.raises(ValueError, match="at least one"):
+            st.coerce(st.BY_KEY["test_urls"], [])
+
+    def test_enforces_the_item_cap(self):
+        s = st.BY_KEY["test_urls"]
+        with pytest.raises(ValueError, match="at most"):
+            st.coerce(s, [f"https://host{i}/204" for i in range(s.max_items + 1)])
+
+    def test_env_var_accepts_a_separated_string(self, store, monkeypatch):
+        monkeypatch.setenv("TEST_URLS", "https://a/204,https://b/204")
+        assert store.get("test_urls") == ["https://a/204", "https://b/204"]
+
+    def test_override_and_persistence(self, store):
+        store.apply({"test_urls": ["https://mine/204"]})
+        store.save()
+        other = st.Store(store.path)
+        other.load()
+        assert other.get("test_urls") == ["https://mine/204"]
+
+    def test_reset_returns_to_the_builtin_list(self, store, monkeypatch):
+        monkeypatch.delenv("TEST_URLS", raising=False)
+        store.apply({"test_urls": ["https://mine/204"]})
+        store.reset("test_urls")
+        assert store.get("test_urls") == st.BY_KEY["test_urls"].default
+
+    def test_describe_tells_the_ui_what_to_accept(self, store):
+        """The panel builds its own field validation from this, so a URL it
+        shows as valid is not rejected after the click."""
+        by_key = {i["key"]: i for i in store.describe()}
+        assert by_key["test_urls"]["schemes"] == ["https"]
+        assert by_key["test_urls"]["probe"] == "target"
+        assert by_key["proxy_sources"]["schemes"] == ["http", "https"]
+        assert by_key["dashboard_rows"]["probe"] == ""
+

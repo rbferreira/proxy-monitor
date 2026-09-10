@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-352%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-373%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
@@ -49,6 +49,10 @@ The other 104 were false positives. The list this produces is smaller and
 usable. `--test-http` on the CLI reproduces the weaker check if you want to see
 it for yourself.
 
+The targets are yours to choose — in the settings panel or through `TEST_URLS` —
+but only as `https://` URLs. That restriction is the measurement above: an
+`http://` target would quietly hand back the 104.
+
 **And a proxy cannot tamper with what comes back.** The tunnel is end-to-end, so
 altering the response means failing certificate validation. Of 87 proxies that
 passed, 87 returned exactly the empty `204` expected.
@@ -83,9 +87,9 @@ stays what it should be, a machine credential for scripts.
 
 ### Settings panel
 
-Eight settings editable at runtime, grouped into Proxy sources, Validation,
-Geolocation and Dashboard. Each shows what it changes, the accepted range, the
-default and the environment variable it comes from.
+Fifteen settings editable at runtime, grouped into Proxy sources, Validation,
+Geolocation, Stability and Dashboard. Each shows what it changes, the accepted
+range, the default and the environment variable it comes from.
 
 **Proxy sources are editable from the panel** — add, remove and reorder the URLs
 without a redeploy. Each row has a **test** button that fetches the URL and
@@ -97,7 +101,14 @@ A source must return plain text, one proxy per line, as `ip:port` or
 `protocol://ip:port`. When the URL carries a `protocol=` parameter it is used
 for lines with no scheme.
 
-**Sources cannot point at your own network.** Only `http`/`https` URLs are
+**The validation targets are editable the same way**, under Validation: the URLs
+every proxy is asked to fetch, the first one answering under 400 deciding the
+verdict. Their test button fetches the URL directly and reports the status and
+how long it took. A typo here is the most expensive one available in the panel —
+every proxy fails the next cycle and the list simply empties, with nothing on
+screen saying why. Only `https://` is accepted, for the reason measured above.
+
+**Neither can point at your own network.** Only `http`/`https` URLs are
 accepted, and hostnames resolving to loopback, RFC1918, link-local or reserved
 addresses are refused. Without that, anyone who can log into the dashboard could
 use the server to probe hosts only it can reach — a router, an unauthenticated
@@ -172,6 +183,7 @@ Everything is optional — the service runs unconfigured. Copy `.env.example` to
 | `VALIDATOR_WORKERS` | `100` | Concurrent validation threads |
 | `LATENCY_SAMPLES` | `3` | Measurements per passing proxy; the median is reported |
 | `DETECT_EXIT_IP` | `true` | Ask each working proxy which address its traffic leaves from |
+| `TEST_URLS` | *(built-in)* | Validation targets, comma or newline separated. `https://` only; the panel overrides it |
 | `STABILITY_ENABLED` | `true` | Re-check the working list to learn what keeps working |
 | `RECHECK_SECONDS` | `120` | How often the working list is re-tested |
 | `STABILITY_MIN_CHECKS` | `5` | Re-checks needed before a proxy is judged at all |
