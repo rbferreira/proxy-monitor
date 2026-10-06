@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-387%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-392%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
@@ -128,6 +128,11 @@ use the server to probe hosts only it can reach — a router, an unauthenticated
 admin panel, or `169.254.169.254`, the cloud metadata endpoint that hands out
 credentials. The three possible answers (responded, connection refused, timed
 out) are enough to map a private network.
+
+The check applies to **every redirect, not just the URL you typed**. A public
+host answering `302 Location: http://169.254.169.254/` would otherwise walk
+straight past it; each hop is checked like a source of its own, and a refused
+one is not retried.
 
 Set `ALLOW_INTERNAL_SOURCES=true` when you genuinely host your proxy list on the
 same private network.
