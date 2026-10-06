@@ -18,6 +18,7 @@ Dependencies:
 """
 
 import argparse
+import http.client
 import ipaddress
 import json
 import os
@@ -29,6 +30,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -106,6 +108,18 @@ DEFAULT_OUTPUT = "proxies.txt"
 KNOWN_SCHEMES = ("http", "https", "socks4", "socks5")
 
 
+def _ip_is_internal(ip) -> bool:
+    """Loopback, RFC1918, link-local, multicast or otherwise reserved.
+
+    An IPv4-mapped IPv6 address (`::ffff:10.0.0.1`) is judged by the IPv4 it
+    carries — it reaches the same host.
+    """
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
 def resolves_to_internal(hostname: str) -> bool:
     """True when the hostname resolves to an address inside the server's own
     network: loopback, RFC1918, link-local, multicast or otherwise reserved.
@@ -113,10 +127,11 @@ def resolves_to_internal(hostname: str) -> bool:
     A name that does not resolve returns False — the fetch will fail on its own,
     and guessing here would block legitimate hosts that are momentarily down.
 
-    Caveat worth knowing: this checks the name at validation time. A hostname
-    that resolves publicly now and privately later (DNS rebinding) slips past.
-    Closing that needs resolving once and connecting to that exact address,
-    which is a bigger change than this guard is worth.
+    This is the early, friendly answer, not the enforcement: the name is
+    resolved again when the fetch connects, and a host whose DNS answers
+    publicly now and privately a second later (rebinding) would slip past a
+    check made here alone. `open_url` closes that by checking the address the
+    socket actually reached.
     """
     if not hostname:
         return True
@@ -129,8 +144,7 @@ def resolves_to_internal(hostname: str) -> bool:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        if _ip_is_internal(ip):
             return True
     return False
 
@@ -148,7 +162,69 @@ def source_is_allowed(url: str) -> tuple[bool, str]:
 
 
 class BlockedRedirect(urllib.error.URLError):
-    """A redirect pointed somewhere `source_is_allowed` refuses."""
+    """A fetch was steered somewhere `source_is_allowed` refuses — by a
+    redirect, or by DNS answering differently at connect time."""
+
+
+def _guarded_create_connection(address, *args, **kwargs):
+    """`socket.create_connection`, refusing to keep a socket that landed on an
+    internal address.
+
+    The check is on the peer of the connected socket, so it does not matter
+    what the name resolved to when it was first checked: whatever DNS answers
+    at connect time is what gets judged. It runs before a single byte is sent,
+    TLS handshake included.
+    """
+    sock = socket.create_connection(address, *args, **kwargs)
+    if ALLOW_INTERNAL_SOURCES:
+        return sock
+    try:
+        peer = ipaddress.ip_address(sock.getpeername()[0])
+    except ValueError:
+        peer = None
+    if peer is None or _ip_is_internal(peer):
+        sock.close()
+        raise BlockedRedirect(
+            f"{address[0]} connected to {peer}, a private address; "
+            "set ALLOW_INTERNAL_SOURCES=true to permit it")
+    return sock
+
+
+class _GuardedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _guarded_create_connection
+
+
+class _GuardedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _guarded_create_connection
+
+
+def _goes_through_a_proxy(req) -> bool:
+    """True when urllib routed this request via HTTP(S)_PROXY.
+
+    Then the socket reaches the proxy, not the source, and the proxy is the
+    operator's own configuration — usually on the private network, by design.
+    Judging that socket would refuse every fetch on a host that needs an egress
+    proxy. The checks by name, on the URL and on every redirect, still apply.
+    """
+    return req.host != urllib.parse.unquote(urllib.parse.urlsplit(req.full_url).netloc)
+
+
+class _GuardedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        cls = (http.client.HTTPConnection if _goes_through_a_proxy(req)
+               else _GuardedHTTPConnection)
+        return self.do_open(cls, req)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        cls = (http.client.HTTPSConnection if _goes_through_a_proxy(req)
+               else _GuardedHTTPSConnection)
+        return self.do_open(cls, req, context=self._context)
 
 
 class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
@@ -170,11 +246,18 @@ class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(_GuardedRedirects)
+_opener = urllib.request.build_opener(
+    _GuardedRedirects, _GuardedHTTPHandler, _GuardedHTTPSHandler)
 
 
 def open_url(req, timeout: float):
-    """urlopen, with the internal-address guard applied to every redirect.
+    """urlopen, with the internal-address guard enforced on every connection.
+
+    Two layers. Each redirect's `Location` is checked by name, which gives a
+    clear error and spends no connection on it. And every socket is checked by
+    the address it actually reached, which is the part that cannot be talked
+    around: not by a redirect, and not by DNS answering one thing to the check
+    and another to the connect.
 
     Everything that fetches an operator-supplied URL goes through here.
     """
