@@ -582,7 +582,7 @@ class TestSourceTesting:
             def __exit__(self, *a): return False
 
         body = b"1.1.1.1:8080\n2.2.2.2:3128\nnot a proxy\n"
-        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+        monkeypatch.setattr(app_module.proxy_validator, "open_url",
                             lambda *a, **kw: FakeResponse(body))
 
         r = client.post("/api/settings/test-source",
@@ -600,7 +600,7 @@ class TestSourceTesting:
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
-        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+        monkeypatch.setattr(app_module.proxy_validator, "open_url",
                             lambda *a, **kw: FakeResponse(b"<html>rate limited</html>"))
         d = client.post("/api/settings/test-source",
                         json={"url": "https://example.com/list"}, headers=KEY).get_json()
@@ -611,7 +611,7 @@ class TestSourceTesting:
         def boom(*a, **kw):
             raise OSError("connection refused")
 
-        monkeypatch.setattr(app_module.urllib.request, "urlopen", boom)
+        monkeypatch.setattr(app_module.proxy_validator, "open_url", boom)
         r = client.post("/api/settings/test-source",
                         json={"url": "https://example.com/list"}, headers=KEY)
         assert r.status_code == 200
@@ -626,7 +626,7 @@ class TestSourceTesting:
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
-        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+        monkeypatch.setattr(app_module.proxy_validator, "open_url",
                             lambda *a, **kw: FakeResponse(b"1.1.1.1:1080\n"))
         d = client.post("/api/settings/test-source",
                         json={"url": "https://api/?protocol=socks5"}, headers=KEY).get_json()
@@ -735,7 +735,7 @@ class TestTargetProbe:
             assert r.get_json()["ok"] is False
 
     def test_reports_the_status_it_answered(self, client, monkeypatch):
-        monkeypatch.setattr(app_module.urllib.request, "urlopen",
+        monkeypatch.setattr(app_module.proxy_validator, "open_url",
                             lambda *a, **kw: _Answer(204))
         d = client.post("/api/settings/test-target",
                         json={"url": self.URL}, headers=KEY).get_json()
@@ -750,7 +750,7 @@ class TestTargetProbe:
             raise app_module.urllib.error.HTTPError(
                 self.URL, 403, "Forbidden", {}, None)
 
-        monkeypatch.setattr(app_module.urllib.request, "urlopen", blocked)
+        monkeypatch.setattr(app_module.proxy_validator, "open_url", blocked)
         r = client.post("/api/settings/test-target", json={"url": self.URL}, headers=KEY)
         assert r.status_code == 200
         d = r.get_json()
@@ -761,7 +761,7 @@ class TestTargetProbe:
         def boom(*a, **kw):
             raise OSError("connection refused")
 
-        monkeypatch.setattr(app_module.urllib.request, "urlopen", boom)
+        monkeypatch.setattr(app_module.proxy_validator, "open_url", boom)
         d = client.post("/api/settings/test-target",
                         json={"url": self.URL}, headers=KEY).get_json()
         assert d["ok"] is False

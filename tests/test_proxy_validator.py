@@ -391,7 +391,7 @@ class TestInternalSourceGuard:
 
         monkeypatch.setattr(pv, "source_is_allowed",
                             lambda u: (("192.168" not in u), "blocked"))
-        monkeypatch.setattr(pv.urllib.request, "urlopen",
+        monkeypatch.setattr(pv, "open_url",
                             lambda *a, **kw: FakeResponse(b"1.1.1.1:8080\n"))
         out = pv.fetch_proxies(["http://192.168.1.1/list", "https://public.example/list"])
         assert out == ["http://1.1.1.1:8080"]
@@ -641,14 +641,14 @@ class TestFetchSourceRetry:
                 raise OSError("connection reset")
             return FakeResp()
 
-        monkeypatch.setattr(pv.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(pv, "open_url", urlopen)
         monkeypatch.setattr(pv.time, "sleep", lambda s: None)
 
         assert pv.fetch_source("https://x/list") == "1.2.3.4:8080"
         assert len(calls) == 3
 
     def test_it_gives_up_and_says_so(self, monkeypatch):
-        monkeypatch.setattr(pv.urllib.request, "urlopen",
+        monkeypatch.setattr(pv, "open_url",
                             lambda req, timeout=30: (_ for _ in ()).throw(OSError("down")))
         monkeypatch.setattr(pv.time, "sleep", lambda s: None)
         assert pv.fetch_source("https://x/list", attempts=2) is None
@@ -666,7 +666,7 @@ class TestFetchSourceRetry:
             def __exit__(self, *a):
                 return False
 
-        monkeypatch.setattr(pv.urllib.request, "urlopen", lambda req, timeout=30: FakeResp())
+        monkeypatch.setattr(pv, "open_url", lambda req, timeout=30: FakeResp())
         monkeypatch.setattr(pv.time, "sleep", slept.append)
         pv.fetch_source("https://x/list")
         assert slept == []

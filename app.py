@@ -2814,7 +2814,7 @@ def api_test_source():
     started = time.perf_counter()
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with proxy_validator.open_url(req, timeout=20) as resp:
             text = resp.read(2_000_000).decode("utf-8", errors="replace")
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:200]}), 200
@@ -2862,7 +2862,7 @@ def api_test_target():
     started = time.perf_counter()
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with proxy_validator.open_url(req, timeout=15) as resp:
             status, body = resp.status, len(resp.read(65_536))
     except urllib.error.HTTPError as exc:
         # A 4xx/5xx is not a failed probe: it is the answer, and it is the same

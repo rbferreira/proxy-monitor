@@ -28,6 +28,7 @@ import statistics
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -144,6 +145,40 @@ def source_is_allowed(url: str) -> tuple[bool, str]:
         return False, (f"{host} resolves to a private address; "
                        "set ALLOW_INTERNAL_SOURCES=true to permit it")
     return True, ""
+
+
+class BlockedRedirect(urllib.error.URLError):
+    """A redirect pointed somewhere `source_is_allowed` refuses."""
+
+
+class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
+    """Re-applies `source_is_allowed` to every hop of a redirect.
+
+    Checking only the URL that was configured is not enough: urlopen follows
+    redirects on its own, so a public source answering `302 Location:
+    http://169.254.169.254/` would hand the guard's whole reason for existing
+    straight back. Each `Location` is checked like a source of its own.
+
+    A URLError rather than an HTTPError on purpose — an HTTPError reads as "the
+    server answered", and the target probe treats a 3xx answer as a pass.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        allowed, reason = source_is_allowed(newurl)
+        if not allowed:
+            raise BlockedRedirect(f"redirect to {newurl} refused: {reason}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_GuardedRedirects)
+
+
+def open_url(req, timeout: float):
+    """urlopen, with the internal-address guard applied to every redirect.
+
+    Everything that fetches an operator-supplied URL goes through here.
+    """
+    return _opener.open(req, timeout=timeout)
 
 
 def sources_from_env() -> list[str] | None:
@@ -313,14 +348,18 @@ def fetch_source(url: str, timeout: int = 30,
     for attempt in range(1, max(1, attempts) + 1):
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open_url(req, timeout=timeout) as resp:
                 return resp.read().decode("utf-8", errors="replace")
+        except BlockedRedirect as exc:
+            # Not transient: asking again gets the same redirect.
+            last = exc
+            break
         except Exception as exc:
             last = exc
             if attempt < attempts:
                 delay = SOURCE_BACKOFF_SECONDS * (2 ** (attempt - 1))
                 time.sleep(delay * (0.5 + random.random()))
-    print(f"WARNING: could not fetch {url} after {attempts} attempts: {last}",
+    print(f"WARNING: could not fetch {url} after {attempt} attempt(s): {last}",
           file=sys.stderr, flush=True)
     return None
 
