@@ -16,6 +16,14 @@ services:
       # session signing key. Without it every restart starts from scratch.
       - proxy-monitor-data:/data
     restart: unless-stopped
+    # Docker's json-file driver keeps everything by default. With a discovery
+    # cycle every 20 minutes and a re-check every 2, that is a log that grows
+    # on the host's disk until someone notices.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   proxy-monitor-data:
