@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-407%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-408%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
@@ -228,6 +228,16 @@ Boolean variables all follow one rule: `true`/`1`/`yes`/`on` and
 ```bash
 docker compose up --build
 ```
+
+The service runs as an unprivileged user (`app`, uid/gid 10001), not as root.
+The container still starts as root for a moment, to take ownership of `/data`,
+and then drops it — which is what lets an installation created by an older image
+upgrade in place: its volume is full of root-owned files, and without that step
+every write would fail quietly. Nothing to do on your side.
+
+If you bind-mount a host directory instead of using the named volume, it gets
+the same treatment. Starting the container with `--user` skips the step
+entirely; the directory then has to be writable by that user already.
 
 Locally:
 
