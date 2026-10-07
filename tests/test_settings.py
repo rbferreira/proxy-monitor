@@ -93,6 +93,16 @@ class TestStore:
         monkeypatch.setenv("INTERVAL_SECONDS", "pineapple")
         assert store.get("interval_seconds") == st.BY_KEY["interval_seconds"].default
 
+    def test_a_boolean_env_can_be_switched_off_with_off(self, store, monkeypatch):
+        monkeypatch.setenv("GEOLOOKUP", "off")
+        assert store.get("geolookup") is False
+
+    def test_an_unrecognised_boolean_env_keeps_the_default(self, store, monkeypatch):
+        """It used to read as true whatever the default was, so a typo in
+        PUBLISH_STABLE_ONLY switched the filter on."""
+        monkeypatch.setenv("PUBLISH_STABLE_ONLY", "pineapple")
+        assert store.get("publish_stable_only") is False
+
     def test_blank_env_falls_back_to_default(self, store, monkeypatch):
         monkeypatch.setenv("INTERVAL_SECONDS", "   ")
         assert store.get("interval_seconds") == st.BY_KEY["interval_seconds"].default

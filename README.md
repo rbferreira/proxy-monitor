@@ -4,7 +4,7 @@ Downloads free proxy lists, checks which ones actually work, and serves the
 survivors over HTTP — with a live dashboard on top.
 
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![tests](https://img.shields.io/badge/tests-400%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-407%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Runs with zero configuration: `docker compose up` and open `http://localhost:8069`.
@@ -219,6 +219,9 @@ Everything is optional — the service runs unconfigured. Copy `.env.example` to
 | `OUTPUT_FILE` | `/data/proxies.txt` | Also decides where the rest of the state lives |
 | `DISABLE_SCHEDULER` | *(empty)* | `1` serves the API without validating |
 | `PORT` | `8069` | Only used by `python app.py` |
+
+Boolean variables all follow one rule: `true`/`1`/`yes`/`on` and
+`false`/`0`/`no`/`off`, case-insensitive. Anything else keeps the default.
 
 ## Running
 

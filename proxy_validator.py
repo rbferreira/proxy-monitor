@@ -90,13 +90,32 @@ IDENTITY_URLS = [
 
 # Source URLs pointing at the server's own network are refused by default.
 #
+def parse_flag(raw, default: bool) -> bool:
+    """One rule for every boolean read from text — env vars and query strings.
+
+    Each flag used to carry its own list, and they disagreed: `on` counted for
+    some and not for others, and PUBLIC_DASHBOARD only knew what "false" looked
+    like, so `off` left the dashboard public — the opposite of what was asked.
+    A value that is not recognised keeps the default instead of picking a side.
+    """
+    text = str(raw or "").strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    return default
+
+
+def env_flag(name: str, default: bool) -> bool:
+    return parse_flag(os.environ.get(name), default)
+
+
 # The service fetches whatever URL it is given, so an operator could otherwise
 # use it to probe hosts only it can reach — a router, an unauthenticated admin
 # panel, or a cloud metadata endpoint like 169.254.169.254, which hands out
 # credentials. Set ALLOW_INTERNAL_SOURCES=true when you genuinely host your
 # proxy list on the same private network.
-ALLOW_INTERNAL_SOURCES = os.environ.get("ALLOW_INTERNAL_SOURCES", "false").lower() in (
-    "true", "1", "yes", "on")
+ALLOW_INTERNAL_SOURCES = env_flag("ALLOW_INTERNAL_SOURCES", False)
 
 MAX_LATENCY_SECONDS = float(os.environ.get("MAX_LATENCY_SECONDS", "5.0"))
 DEFAULT_WORKERS = int(os.environ.get("VALIDATOR_WORKERS", "100"))

@@ -51,12 +51,12 @@ LIST_TOKEN_PATHS = {"/proxy/all.txt"}
 
 # Dashboard readable without logging in. With PUBLIC_DASHBOARD=false, / and
 # /api/stats require the session too.
-PUBLIC_DASHBOARD = os.environ.get("PUBLIC_DASHBOARD", "true").lower() not in ("false", "0", "no")
+PUBLIC_DASHBOARD = proxy_validator.env_flag("PUBLIC_DASHBOARD", True)
 
 # Session cookie over HTTPS only. Off by default because these services are
 # commonly reached over plain http on a local network — turned on there, the
 # cookie would never be sent and the login would look broken.
-SESSION_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "false").lower() in ("true", "1", "yes")
+SESSION_SECURE = proxy_validator.env_flag("SESSION_COOKIE_SECURE", False)
 
 app = Flask(__name__)
 
@@ -614,7 +614,7 @@ def start_background_worker() -> None:
         _log(f"Stability history restored for {len(stability_store)} proxies")
 
     load_cached_proxies()
-    if os.environ.get("DISABLE_SCHEDULER", "").lower() in ("1", "true", "yes"):
+    if proxy_validator.env_flag("DISABLE_SCHEDULER", False):
         _log("Scheduler disabled by DISABLE_SCHEDULER")
         return
     threading.Thread(target=scheduler_loop, daemon=True, name="proxy-validator").start()
@@ -2586,12 +2586,8 @@ def _stable_only() -> bool:
     on can still pull everything with ?stable=false to see what was filtered,
     and a consumer can opt in without touching server configuration.
     """
-    raw = request.args.get("stable", "").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    return bool(cfg("publish_stable_only"))
+    return proxy_validator.parse_flag(request.args.get("stable"),
+                                      bool(cfg("publish_stable_only")))
 
 
 def apply_stable_filter(proxies: list[str]) -> tuple[list[str], bool]:

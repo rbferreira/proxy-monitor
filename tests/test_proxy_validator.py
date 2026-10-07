@@ -795,3 +795,26 @@ class TestSourceProgressReporting:
 
         assert [d for d, _t, _f in seen] == [1, 2]
 
+
+
+class TestParseFlag:
+    """One rule for every boolean read from text."""
+
+    @pytest.mark.parametrize("raw", ["true", "1", "yes", "on", " On ", "TRUE"])
+    def test_truthy(self, raw):
+        assert pv.parse_flag(raw, False) is True
+
+    @pytest.mark.parametrize("raw", ["false", "0", "no", "off", " Off ", "FALSE"])
+    def test_falsy(self, raw):
+        assert pv.parse_flag(raw, True) is False
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "maybe", "2"])
+    @pytest.mark.parametrize("default", [True, False])
+    def test_anything_else_keeps_the_default(self, raw, default):
+        assert pv.parse_flag(raw, default) is default
+
+    def test_env_flag_reads_the_variable(self, monkeypatch):
+        monkeypatch.setenv("SOME_FLAG", "off")
+        assert pv.env_flag("SOME_FLAG", True) is False
+        monkeypatch.delenv("SOME_FLAG")
+        assert pv.env_flag("SOME_FLAG", True) is True
