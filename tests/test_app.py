@@ -1400,3 +1400,30 @@ class TestBadgeStaysHonest:
 
         assert int(claimed.group(1)) == actual, (
             f"README says {claimed.group(1)} tests, the suite has {actual}")
+
+
+class TestBooleanEnvVarsAtBoot:
+    """These are read once, at import, so the only honest test is a fresh
+    interpreter. `off` used to leave the dashboard public and `on` used to be
+    ignored for the cookie and the scheduler."""
+
+    def test_off_and_on_mean_what_they_say(self, tmp_path):
+        import subprocess
+        import sys
+
+        env = dict(os.environ)
+        env.update({
+            "OUTPUT_FILE": str(tmp_path / "proxies.txt"),
+            "GEOLOOKUP": "false",
+            "PUBLIC_DASHBOARD": "off",
+            "SESSION_COOKIE_SECURE": "on",
+            "DISABLE_SCHEDULER": "on",
+        })
+        root = os.path.dirname(os.path.abspath(app_module.__file__))
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import app; print('FLAGS', app.PUBLIC_DASHBOARD, app.SESSION_SECURE)"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=60)
+
+        assert "FLAGS False True" in out.stdout, out.stdout + out.stderr
+        assert "Scheduler disabled" in out.stdout

@@ -133,7 +133,7 @@ def _from_env(s: Setting):
         if s.type == "list":
             return parse_list(raw)
         if s.type == "bool":
-            return raw.lower() not in ("false", "0", "no", "off")
+            return proxy_validator.parse_flag(raw, s.default)
         if s.type == "int":
             return int(raw)
         return float(raw)
