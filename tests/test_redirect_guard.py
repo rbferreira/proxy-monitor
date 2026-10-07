@@ -141,6 +141,23 @@ class TestCheckedAtConnectTime:
         assert pv.fetch_source(f"{public}/list") is None
         assert internal_hits == []
 
+    def test_a_refusal_at_connect_time_is_not_retried(self, servers, monkeypatch):
+        internal = servers(_body(INTERNAL_BODY), INTERNAL)
+        monkeypatch.setattr(pv, "resolves_to_internal", lambda host: False)
+        slept = []
+        monkeypatch.setattr(pv.time, "sleep", slept.append)
+
+        assert pv.fetch_source(f"{internal}/", attempts=3) is None
+        assert slept == [], "a refused address was retried"
+
+    def test_the_refusal_reads_once(self, servers, monkeypatch):
+        internal = servers(_body(INTERNAL_BODY), INTERNAL)
+        monkeypatch.setattr(pv, "resolves_to_internal", lambda host: False)
+
+        with pytest.raises(pv.BlockedRedirect) as caught:
+            pv.open_url(pv.urllib.request.Request(f"{internal}/"), timeout=5)
+        assert str(caught.value).count("urlopen error") == 1
+
     def test_ipv4_mapped_ipv6_is_judged_by_its_ipv4(self):
         import ipaddress
         assert pv._ip_is_internal(ipaddress.ip_address("::ffff:10.0.0.1"))

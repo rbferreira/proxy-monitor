@@ -261,7 +261,15 @@ def open_url(req, timeout: float):
 
     Everything that fetches an operator-supplied URL goes through here.
     """
-    return _opener.open(req, timeout=timeout)
+    try:
+        return _opener.open(req, timeout=timeout)
+    except urllib.error.URLError as exc:
+        # urllib wraps anything raised while connecting in a URLError of its
+        # own. Unwrapped, the refusal reads once instead of nested twice, and
+        # callers can still tell it apart from a host that is merely down.
+        if isinstance(exc.reason, BlockedRedirect):
+            raise exc.reason from None
+        raise
 
 
 def sources_from_env() -> list[str] | None:
