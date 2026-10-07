@@ -158,6 +158,34 @@ class TestCheckedAtConnectTime:
             pv.open_url(pv.urllib.request.Request(f"{internal}/"), timeout=5)
         assert str(caught.value).count("urlopen error") == 1
 
+    def test_https_is_refused_before_the_handshake(self, servers, monkeypatch):
+        """The check sits under TLS, so an https URL is judged the same way —
+        and nothing, not even a ClientHello, reaches the internal host."""
+        internal_hits = []
+        internal = servers(_body(INTERNAL_BODY, internal_hits), INTERNAL)
+        monkeypatch.setattr(pv, "resolves_to_internal", lambda host: False)
+        url = internal.replace("http://", "https://") + "/"
+
+        with pytest.raises(pv.BlockedRedirect, match="private address"):
+            pv.open_url(pv.urllib.request.Request(url), timeout=5)
+        assert internal_hits == []
+
+    def test_the_target_probe_reports_it_as_a_failure(self, servers, monkeypatch):
+        """test-target counts any answer below 400 as a pass, so a refusal has
+        to arrive as an error and never as an answer."""
+        internal_hits = []
+        internal = servers(_body(INTERNAL_BODY, internal_hits), INTERNAL)
+        monkeypatch.setattr(pv, "resolves_to_internal", lambda host: False)
+        url = internal.replace("http://", "https://") + "/"
+
+        client = app_module.app.test_client()
+        d = client.post("/api/settings/test-target",
+                        json={"url": url}, headers=KEY).get_json()
+        assert d["ok"] is False
+        assert "private address" in d["error"]
+        assert "status" not in d
+        assert internal_hits == []
+
     def test_ipv4_mapped_ipv6_is_judged_by_its_ipv4(self):
         import ipaddress
         assert pv._ip_is_internal(ipaddress.ip_address("::ffff:10.0.0.1"))
