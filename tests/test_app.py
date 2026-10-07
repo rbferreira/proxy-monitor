@@ -960,6 +960,26 @@ class TestImageContents:
                     return {p for p in line.split() if p.endswith(".py")}
         raise AssertionError("no COPY line for python modules in the Dockerfile")
 
+    def _root_file(self, name):
+        here = os.path.dirname(os.path.abspath(app_module.__file__))
+        return os.path.join(here, name)
+
+    def test_the_image_drops_root_through_the_entrypoint(self):
+        """The image must not be left running as root, and must not switch user
+        in the Dockerfile either: a `USER` line skips the entrypoint's chown and
+        strands every volume created by an older image."""
+        with open(self._root_file("Dockerfile"), encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+        assert any(l.startswith("COPY ") and "docker-entrypoint.sh" in l for l in lines)
+        assert any(l.startswith("ENTRYPOINT") and "docker-entrypoint.sh" in l for l in lines)
+        assert not any(l.startswith("USER ") for l in lines)
+
+        with open(self._root_file("docker-entrypoint.sh"), "rb") as f:
+            script = f.read()
+        assert b"chown" in script and b"setpriv" in script
+        # A CRLF shebang is "no such file or directory" at container start.
+        assert bytes([13]) not in script
+
     def test_every_local_module_app_imports_is_copied(self):
         import ast
 
