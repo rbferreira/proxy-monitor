@@ -600,9 +600,17 @@ def validate(
     proxies = {"http": url, "https": url}
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    # Slightly above the latency budget: avoids cutting the handshake short,
-    # while the real cutoff is the latency comparison below.
-    req_timeout = max_latency + 1.0
+    # Connect, then read. The read allowance sits slightly above the latency
+    # budget so a response arriving right at the edge is still measured; the
+    # real cutoff is the comparison below.
+    #
+    # The connect allowance is the budget itself, not more: a proxy that needs
+    # longer than that just to accept the connection cannot finish the request
+    # inside the budget, so waiting the extra second only buys a certain fail.
+    # Most candidates never connect at all, and each test URL waits this out,
+    # so that second is paid several times per dead proxy — measured, about a
+    # quarter of a cycle, with the same proxies passing.
+    req_timeout = (max_latency, max_latency + 1.0)
 
     def measure(test: str) -> float | None:
         start = time.perf_counter()

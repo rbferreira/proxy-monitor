@@ -151,6 +151,19 @@ class TestValidate:
         monkeypatch.setattr(pv.requests, "get", slow_get)
         assert pv.validate("http://1.1.1.1:80", ["https://test"], max_latency=0.1) == (False, None)
 
+    def test_connect_waits_no_longer_than_the_budget(self, monkeypatch):
+        """A connection slower than the whole budget cannot pass, so waiting
+        past it only costs time — on every test URL of every dead proxy."""
+        seen = []
+
+        def get(url, **kwargs):
+            seen.append(kwargs["timeout"])
+            raise OSError("timed out")
+
+        monkeypatch.setattr(pv.requests, "get", get)
+        pv.validate("http://1.1.1.1:80", ["https://a", "https://b"], max_latency=3.0)
+        assert seen == [(3.0, 4.0), (3.0, 4.0)]
+
     def test_rejects_error_status(self, monkeypatch):
         class FakeResp:
             status_code = 502
